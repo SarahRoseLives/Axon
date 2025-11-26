@@ -33,12 +33,10 @@
             const container = document.getElementById('chat-peer-list');
             if (!container) return;
 
-            // Sort peers: Unread first, then Active, then Alphabetical
             peers.sort((a, b) => {
                 const statA = chatStatusMap[a.onion_address] || {};
                 const statB = chatStatusMap[b.onion_address] || {};
                 if (statA.unread !== statB.unread) return statA.unread ? -1 : 1;
-                // If both unread or both read, rely on last message time if available
                 if (statA.last_active && statB.last_active) {
                     return new Date(statB.last_active) - new Date(statA.last_active);
                 }
@@ -50,13 +48,11 @@
                 const isActive = activePeer === p.onion_address;
                 const activeClass = isActive ? 'bg-slate-800 border-l-2 border-cyan-500' : 'border-l-2 border-transparent hover:bg-slate-800/50';
 
-                // Unread Indicator
                 let badge = '';
                 if (status.unread && !isActive) {
                     badge = `<div class="w-2 h-2 rounded-full bg-red-500 shadow-md shadow-red-500/50"></div>`;
                 }
 
-                // Snippet
                 const snippet = status.snippet || p.onion_address.substring(0, 16) + "...";
                 const snippetClass = status.unread ? 'text-slate-200 font-medium' : 'text-slate-500';
 
@@ -70,8 +66,6 @@
                 </div>`;
             }).join('');
 
-            // Only update if changed (prevents click jumps)
-            // Ideally use diffing, but length check helps a bit
             if (container.innerHTML.length !== html.length && html.length > 0) {
                 container.innerHTML = html;
             } else if (peers.length === 0) {
@@ -99,7 +93,7 @@
                      <div class="mt-2 text-[10px] font-mono text-cyan-400 bg-black/50 px-2 py-0.5 rounded border border-cyan-900/50">You</div>
                 </div>`;
 
-            svg.innerHTML = ''; // Clear lines
+            svg.innerHTML = '';
 
             // 2. PEERS
             if (peers.length > 0) {
@@ -140,13 +134,15 @@
         function openChat(peerID) {
             activePeer = peerID;
             switchTab('chat');
-
             document.getElementById('active-chat-peer').innerText = peerID;
             document.getElementById('header-status-dot').classList.remove('bg-slate-600');
             document.getElementById('header-status-dot').classList.add('bg-emerald-500', 'shadow-[0_0_8px_rgba(16,185,129,0.5)]');
 
-            document.getElementById('chat-input').disabled = false;
-            document.getElementById('chat-input').focus();
+            const input = document.getElementById('chat-input');
+            input.disabled = false;
+            input.placeholder = `Message ${peerID.substring(0,16)}...`;
+            input.focus();
+
             const btn = document.getElementById('chat-send-btn');
             btn.disabled = false;
             btn.classList.remove('bg-cyan-900', 'text-slate-500', 'cursor-not-allowed');
@@ -184,7 +180,7 @@
                 if(!container) return;
 
                 if(msgs.length === 0) {
-                    container.innerHTML = `<div class="text-center mt-10 text-slate-600 text-xs">Start a conversation with ${activePeer.substring(0,10)}...</div>`;
+                    container.innerHTML = `<div class="text-center mt-10 text-slate-600 text-xs">Start a conversation...</div>`;
                     return;
                 }
 
@@ -194,10 +190,20 @@
                     const bg = isMe ? 'bg-cyan-900/20 border-cyan-800/50 text-cyan-100 rounded-tr-none' : 'bg-slate-800 border-slate-700 text-slate-200 rounded-tl-none';
                     const time = new Date(m.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
 
+                    // Status Icons
+                    let statusIcon = '';
+                    if (isMe) {
+                        if (m.status === 'sent') statusIcon = '<span class="text-emerald-500 text-[10px]">✓</span>';
+                        else if (m.status === 'pending') statusIcon = '<span class="text-slate-500 text-[10px]">🕒</span>';
+                    }
+
                     return `
                     <div class="flex flex-col ${align}">
                         <div class="max-w-[70%] p-3 rounded-lg text-sm border ${bg}">${m.content}</div>
-                        <div class="flex items-center gap-2 mt-1 px-1"><span class="text-[10px] text-slate-600 font-mono">${time}</span></div>
+                        <div class="flex items-center gap-2 mt-1 px-1">
+                            <span class="text-[10px] text-slate-600 font-mono">${time}</span>
+                            ${statusIcon}
+                        </div>
                     </div>`;
                 }).join('');
 
@@ -208,24 +214,20 @@
             } catch(e) { console.error(e); }
         }
 
-// --- GLOBAL POLLER ---
+        // --- GLOBAL POLLER ---
         setInterval(async () => {
             try {
-                // 1. Get Peers
                 const resPeers = await fetch('/api/peers');
                 if (!resPeers.ok) return;
                 const dataPeers = await resPeers.json();
-                // Safety check: ensure peers is an array
                 const peers = dataPeers.peers || [];
                 const selfAddr = dataPeers.self || "";
 
-                // 2. Get Chat Status
                 const resStatus = await fetch('/api/chat/status');
                 let chatStatusMap = {};
                 let totalUnread = 0;
 
                 if (resStatus.ok) {
-                    // FIX: Handle null response safely with ( ... || [] )
                     const statusData = await resStatus.json() || [];
                     statusData.forEach(s => {
                         chatStatusMap[s.peer_id] = s;
@@ -233,7 +235,6 @@
                     });
                 }
 
-                // 3. Update HUD & Topo
                 const netView = document.getElementById('view-network');
                 if (netView && !netView.classList.contains('hidden')) {
                      const hud = document.getElementById('hud-node-count');
@@ -241,27 +242,21 @@
                      renderTopology(peers, selfAddr);
                 }
 
-                // 4. Update Chat Sidebar
                 const chatView = document.getElementById('view-chat');
                 if (chatView && !chatView.classList.contains('hidden')) {
                     renderChatSidebar(peers, chatStatusMap);
                 }
 
-                // 5. Update Global Badge
                 const badge = document.getElementById('nav-chat-badge');
                 if(badge) {
                     if (totalUnread > 0) badge.classList.remove('hidden');
                     else badge.classList.add('hidden');
                 }
 
-                // 6. Poll Active Chat messages
                 pollChat();
 
-            } catch(e) {
-                console.error("Poll cycle failed", e);
-            }
+            } catch(e) { console.error("Poll cycle failed", e); }
         }, 1500);
-
 
         // --- Navigation ---
         function switchTab(tabId) {

@@ -2,15 +2,15 @@ package chat
 
 import "time"
 
-// WireMessage is the encrypted payload sent over HTTP
 type WireMessage struct {
 	From       string `json:"from"`
 	Ciphertext string `json:"ciphertext"`
 	Nonce      string `json:"nonce"`
 }
 
-// Message is the internal decrypted model
 type Message struct {
+	ID        string    `json:"id"`     // <--- NEW: Unique ID
+	Status    string    `json:"status"` // <--- NEW: pending, sent, received
 	From      string    `json:"from"`
 	To        string    `json:"to"`
 	Content   string    `json:"content"`
@@ -18,7 +18,6 @@ type Message struct {
 	Incoming  bool      `json:"incoming"`
 }
 
-// Conversation tracks history and metadata
 type Conversation struct {
 	Messages   []Message `json:"messages"`
 	Unread     bool      `json:"unread"`
@@ -26,7 +25,6 @@ type Conversation struct {
 	Snippet    string    `json:"snippet"`
 }
 
-// ChatStatus is used for the UI Sidebar
 type ChatStatus struct {
 	PeerID     string    `json:"peer_id"`
 	Unread     bool      `json:"unread"`

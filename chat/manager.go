@@ -25,12 +25,10 @@ type Manager struct {
 }
 
 func NewManager(dataDir string) (*Manager, error) {
-	// Load Encryption Key
 	privKey, err := identity.LoadOrGenerateChatKey(dataDir)
 	if err != nil {
 		return nil, err
 	}
-
 	mgr := &Manager{
 		Conversations: make(map[string]*Conversation),
 		DataDir:       dataDir,
@@ -50,6 +48,16 @@ func (m *Manager) SaveMessage(peerID string, msg Message) {
 		m.Conversations[peerID] = &Conversation{}
 	}
 	conv := m.Conversations[peerID]
+
+	// Default status if missing
+	if msg.Status == "" {
+		if msg.Incoming {
+			msg.Status = "received"
+		} else {
+			msg.Status = "pending"
+		}
+	}
+
 	conv.Messages = append(conv.Messages, msg)
 	conv.LastActive = time.Now()
 
@@ -67,6 +75,38 @@ func (m *Manager) SaveMessage(peerID string, msg Message) {
 	m.saveInternal()
 }
 
+func (m *Manager) UpdateMessageStatus(peerID, msgID, status string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	conv, exists := m.Conversations[peerID]
+	if !exists { return }
+
+	// Find and update
+	for i, msg := range conv.Messages {
+		if msg.ID == msgID {
+			conv.Messages[i].Status = status
+			m.saveInternal()
+			return
+		}
+	}
+}
+
+func (m *Manager) GetPendingMessages() map[string][]Message {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	pending := make(map[string][]Message)
+	for peerID, conv := range m.Conversations {
+		for _, msg := range conv.Messages {
+			if !msg.Incoming && msg.Status == "pending" {
+				pending[peerID] = append(pending[peerID], msg)
+			}
+		}
+	}
+	return pending
+}
+
 func (m *Manager) GetHistory(peerID string) []Message {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -74,7 +114,7 @@ func (m *Manager) GetHistory(peerID string) []Message {
 	conv, exists := m.Conversations[peerID]
 	if exists {
 		conv.Unread = false
-		m.saveInternal() // Persist read state
+		m.saveInternal()
 		return conv.Messages
 	}
 	return []Message{}
@@ -93,7 +133,6 @@ func (m *Manager) GetStatusList() []ChatStatus {
 			Snippet:    c.Snippet,
 		})
 	}
-	// Sort by recent
 	sort.Slice(list, func(i, j int) bool {
 		return list[i].LastActive.After(list[j].LastActive)
 	})
@@ -125,18 +164,12 @@ func (m *Manager) GetMyPublicKey() string {
 
 func (m *Manager) Encrypt(peerPubKeyHex, plaintext string) (string, string, error) {
 	peerBytes, err := hex.DecodeString(peerPubKeyHex)
-	if err != nil {
-		return "", "", err
-	}
+	if err != nil { return "", "", err }
 	peerKey, err := ecdh.X25519().NewPublicKey(peerBytes)
-	if err != nil {
-		return "", "", err
-	}
+	if err != nil { return "", "", err }
 
 	sharedSecret, err := m.PrivKey.ECDH(peerKey)
-	if err != nil {
-		return "", "", err
-	}
+	if err != nil { return "", "", err }
 
 	block, _ := aes.NewCipher(sharedSecret)
 	gcm, _ := cipher.NewGCM(block)
@@ -160,8 +193,6 @@ func (m *Manager) Decrypt(peerPubKeyHex, ciphertextHex, nonceHex string) (string
 	ciphertext, _ := hex.DecodeString(ciphertextHex)
 
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
-	if err != nil {
-		return "", err
-	}
+	if err != nil { return "", err }
 	return string(plaintext), nil
 }

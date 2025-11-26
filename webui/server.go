@@ -4,11 +4,11 @@ import (
 	"axon/chat"
 	"axon/discovery"
 	"axon/tor"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"html/template"
 	"log"
+	mrand "math/rand"
 	"net/http"
 	"time"
 )
@@ -21,20 +21,18 @@ type UIContext struct {
 }
 
 func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
-	// 1. Initialize Chat Manager (Store + Crypto)
 	dataDir := fmt.Sprintf("data_%d", port)
 	chatMgr, err := chat.NewManager(dataDir)
 	if err != nil {
 		log.Fatalf("Failed to init chat manager: %v", err)
 	}
 
-	// 2. Start Gossip
-	StartBackgroundTasks(torCtrl, pm, chatMgr.GetMyPublicKey())
+	// START WORKERS
+	StartBackgroundTasks(torCtrl, pm, chatMgr.GetMyPublicKey()) // Gossip
+	StartOutboxLoop(torCtrl, pm, chatMgr)                       // Store & Forward
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	fmt.Printf("🖥️  AXON UI Ready at http://%s\n", addr)
-
-	// --- ROUTES ---
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		status := "Initializing..."
@@ -44,7 +42,7 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 			onion = torCtrl.Onion.ID + ".onion"
 		}
 		data := UIContext{
-			AppVersion: "0.9.8 (Refactored)",
+			AppVersion: "0.9.9 (Store & Forward)",
 			OnionAddr:  onion,
 			Status:     status,
 			Peers:      pm.GetPeers(),
@@ -132,81 +130,42 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 	})
 
 	http.HandleFunc("/api/chat/send", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			return
-		}
+		if r.Method != http.MethodPost { return }
 		var req struct {
 			To      string `json:"to"`
 			Content string `json:"content"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 
-		if req.To == "" || req.Content == "" {
-			return
+		if req.To == "" || req.Content == "" { return }
+
+		// 1. Create Message Object
+		msgID := fmt.Sprintf("%d-%d", time.Now().UnixNano(), mrand.Intn(9999))
+		msg := chat.Message{
+			ID:        msgID,
+			From:      "me",
+			To:        req.To,
+			Content:   req.Content,
+			Timestamp: time.Now(),
+			Incoming:  false,
+			Status:    "pending", // Default to Pending
 		}
 
-		peerKeyHex := pm.GetPublicKey(req.To)
-		if peerKeyHex == "" {
-			go PerformHandshake(torCtrl, pm, req.To, chatMgr.GetMyPublicKey())
-			http.Error(w, "Peer encryption key missing. Handshaking...", 500)
-			return
-		}
-
-		ciphertext, nonce, err := chatMgr.Encrypt(peerKeyHex, req.Content)
-		if err != nil {
-			http.Error(w, "Encryption failed", 500)
-			return
-		}
-
-		// Save Locally
-		msg := chat.Message{From: "me", To: req.To, Content: req.Content, Timestamp: time.Now(), Incoming: false}
+		// 2. Save Locally (as pending)
 		chatMgr.SaveMessage(req.To, msg)
 
-		// Send over Tor
+		// 3. Try Sending Async (if it fails, Outbox picks it up later)
 		go func() {
-			if torCtrl.Onion == nil {
-				return
-			}
-			client, err := torCtrl.GetHttpClient()
-			if err != nil {
-				return
-			}
-
-			wireMsg := chat.WireMessage{
-				From:       torCtrl.Onion.ID + ".onion",
-				Ciphertext: ciphertext,
-				Nonce:      nonce,
-			}
-			jsonBytes, _ := json.Marshal(wireMsg)
-
-			for i := 0; i < 3; i++ {
-				resp, err := client.Post(
-					fmt.Sprintf("http://%s/api/chat/recv", req.To),
-					"application/json",
-					bytes.NewBuffer(jsonBytes),
-				)
-				if err == nil {
-					resp.Body.Close()
-					if resp.StatusCode == 200 {
-						return
-					}
-				}
-				time.Sleep(5 * time.Second)
-			}
-			fmt.Printf("❌ Failed to send to %s\n", req.To)
+			AttemptSendMessage(torCtrl, pm, chatMgr, req.To, msg)
 		}()
 
-		w.Write([]byte(`{"status":"sent"}`))
+		w.Write([]byte(`{"status":"queued"}`))
 	})
 
 	http.HandleFunc("/api/chat/recv", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			return
-		}
+		if r.Method != http.MethodPost { return }
 		var wireMsg chat.WireMessage
-		if err := json.NewDecoder(r.Body).Decode(&wireMsg); err != nil {
-			return
-		}
+		if err := json.NewDecoder(r.Body).Decode(&wireMsg); err != nil { return }
 
 		from := Sanitize(wireMsg.From)
 		peerKeyHex := pm.GetPublicKey(from)
@@ -222,7 +181,16 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 			return
 		}
 
-		msg := chat.Message{From: from, To: "me", Content: plaintext, Timestamp: time.Now(), Incoming: true}
+		msgID := fmt.Sprintf("%d-%d", time.Now().UnixNano(), mrand.Intn(9999))
+		msg := chat.Message{
+			ID:        msgID,
+			From:      from,
+			To:        "me",
+			Content:   plaintext,
+			Timestamp: time.Now(),
+			Incoming:  true,
+			Status:    "received",
+		}
 		chatMgr.SaveMessage(from, msg)
 
 		fmt.Printf("📩 Encrypted msg received from %s\n", from)
