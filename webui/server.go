@@ -16,7 +16,7 @@ import (
 type UIContext struct {
 	AppVersion string
 	OnionAddr  string
-	MyOnionAddr string // NEW: for use in the Feed view
+	MyOnionAddr string
 	Status     string
 	Peers      []discovery.Peer
 	Nickname   string
@@ -53,11 +53,13 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 		data := UIContext{
 			AppVersion: "0.9.14 (Trust Trails)",
 			OnionAddr:  onion,
-			MyOnionAddr: myOnion, // NEW
+			MyOnionAddr: myOnion,
 			Status:     status,
 			Peers:      pm.GetPeers(),
 			Nickname:   profileMgr.GetNickname(),
 		}
+
+		// UPDATED: Include the new scripts.html template file
 		tmpl, _ := template.ParseGlob("webui/templates/*.html")
 		tmpl.ExecuteTemplate(w, "index.html", data)
 	})
@@ -114,7 +116,7 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 		if torCtrl.Onion != nil && target == torCtrl.Onion.ID + ".onion" { return }
 
 		if !pm.HasPeer(target) {
-			pm.AddPeer(target, "direct", "", "", "") // Manual add = no introducer
+			pm.AddPeer(target, "direct", "", "", "")
 		}
 		go PerformHandshake(torCtrl, pm, target, chatMgr.GetMyPublicKey(), profileMgr.GetNickname())
 		w.Write([]byte(`{"status":"success"}`))
@@ -133,7 +135,6 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 		}
 
 		fmt.Printf("👋 Handshake from %s (%s)\n", from, req.Nickname)
-		// They contacted us directly, so IntroducedBy is empty
 		pm.AddPeer(from, "neighbor", req.PublicKey, req.Nickname, "")
 
 		knownPeers := pm.GetPeers()
@@ -212,7 +213,7 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 		w.Write([]byte(`{"status":"received"}`))
 	})
 
-	// NEW: Feed Handlers
+	// Feed Handlers
 	http.HandleFunc("/api/feed/history", func(w http.ResponseWriter, r *http.Request) {
 		msgs := chatMgr.GetFeedHistory()
 		w.Header().Set("Content-Type", "application/json")
@@ -236,7 +237,6 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 		from := Sanitize(wireMsg.From)
 		if pm.IsBlocked(from) { return }
 
-		// This is a public message, so no decryption is needed
 		msgID := fmt.Sprintf("%d-%s", time.Now().UnixNano(), wireMsg.Nonce)
 		msg := chat.Message{
 			ID:        msgID,

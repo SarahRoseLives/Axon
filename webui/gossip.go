@@ -27,7 +27,7 @@ func StartBackgroundTasks(torCtrl *tor.Controller, pm *discovery.PeerManager, my
 	go func() {
 		time.Sleep(30 * time.Second)
 		for {
-			time.Sleep(60 * time.Second)
+			time.Sleep(10 * time.Second)
 			if torCtrl.Onion == nil {
 				continue
 			}
