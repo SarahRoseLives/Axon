@@ -28,6 +28,28 @@
         lucide.createIcons();
         let activePeer = null;
 
+        // --- IDENTITY LOGIC ---
+        async function saveNickname() {
+            const input = document.getElementById('identity-nickname-input');
+            const name = input.value.trim();
+            if(!name) return;
+
+            try {
+                const res = await fetch('/api/identity', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ nickname: name })
+                });
+                if (res.ok) {
+                    alert("Identity Saved! It will be shared in the next handshake.");
+                    // Force a reload to update header instantly? Or just wait for poll.
+                }
+            } catch(e) {
+                console.error("Failed to save nickname", e);
+                alert("Error saving identity.");
+            }
+        }
+
         // --- Render Chat Sidebar ---
         function renderChatSidebar(peers, chatStatusMap) {
             const container = document.getElementById('chat-peer-list');
@@ -53,13 +75,17 @@
                     badge = `<div class="w-2 h-2 rounded-full bg-red-500 shadow-md shadow-red-500/50"></div>`;
                 }
 
-                const snippet = status.snippet || p.onion_address.substring(0, 16) + "...";
+                const snippet = status.snippet || "No messages yet";
                 const snippetClass = status.unread ? 'text-slate-200 font-medium' : 'text-slate-500';
 
+                // DISPLAY NAME LOGIC
+                const displayName = p.nickname || p.onion_address;
+                const subtext = p.nickname ? p.onion_address.substring(0,12)+"..." : "";
+
                 return `
-                <div onclick="openChat('${p.onion_address}')" class="p-3 cursor-pointer transition-all ${activeClass} border-b border-slate-800/50">
+                <div onclick="openChat('${p.onion_address}', '${p.nickname}')" class="p-3 cursor-pointer transition-all ${activeClass} border-b border-slate-800/50">
                     <div class="flex justify-between items-start mb-1">
-                        <span class="font-medium text-xs text-slate-300 truncate w-32">${p.onion_address}</span>
+                        <span class="font-medium text-sm text-slate-200 truncate w-32" title="${p.onion_address}">${displayName}</span>
                         ${badge}
                     </div>
                     <div class="text-[10px] ${snippetClass} font-mono truncate">${snippet}</div>
@@ -83,7 +109,6 @@
             const w = container.clientWidth; const h = container.clientHeight;
             const cx = w / 2; const cy = h / 2; const radius = Math.min(w, h) / 3.5;
 
-            // 1. SELF
             let html = `
                 <div class="absolute transform -translate-x-1/2 -translate-y-1/2 flex flex-col items-center justify-center pointer-events-auto" style="left: ${cx}px; top: ${cy}px">
                      <div class="w-16 h-16 rounded-full bg-slate-900 border-2 border-cyan-500 z-10 flex items-center justify-center shadow-[0_0_20px_rgba(6,182,212,0.3)]">
@@ -95,7 +120,6 @@
 
             svg.innerHTML = '';
 
-            // 2. PEERS
             if (peers.length > 0) {
                 const angleStep = (2 * Math.PI) / peers.length;
                 peers.forEach((peer, index) => {
@@ -117,12 +141,15 @@
                     const textColor = isDirect ? 'text-emerald-500' : 'text-amber-500';
                     const icon = isDirect ? 'shield' : 'share-2';
 
+                    // USE NICKNAME IF AVAILABLE
+                    const label = peer.nickname || peer.onion_address.substring(0,8)+"...";
+
                     html += `
-                    <div onclick="openChat('${peer.onion_address}')" class="absolute transform -translate-x-1/2 -translate-y-1/2 flex flex-col items-center justify-center pointer-events-auto cursor-pointer hover:scale-110 transition-transform duration-200" style="left: ${px}px; top: ${py}px" title="Chat with ${peer.onion_address}">
+                    <div onclick="openChat('${peer.onion_address}', '${peer.nickname}')" class="absolute transform -translate-x-1/2 -translate-y-1/2 flex flex-col items-center justify-center pointer-events-auto cursor-pointer hover:scale-110 transition-transform duration-200" style="left: ${px}px; top: ${py}px" title="${peer.onion_address}">
                          <div class="w-12 h-12 rounded-full bg-slate-900 border-2 ${borderColor} z-10 flex items-center justify-center shadow-lg">
                             <i data-lucide="${icon}" class="w-5 h-5 ${textColor}"></i>
                          </div>
-                         <div class="mt-2 text-[10px] font-mono text-slate-400 bg-black/50 px-2 py-0.5 rounded border border-slate-800">${peer.onion_address.substring(0,8)}...</div>
+                         <div class="mt-2 text-[10px] font-mono text-slate-400 bg-black/50 px-2 py-0.5 rounded border border-slate-800 whitespace-nowrap">${label}</div>
                     </div>`;
                 });
             }
@@ -131,16 +158,27 @@
         }
 
         // --- Chat Actions ---
-        function openChat(peerID) {
+        function openChat(peerID, nickname) {
             activePeer = peerID;
             switchTab('chat');
-            document.getElementById('active-chat-peer').innerText = peerID;
+
+            // Show Nickname in header if available
+            const displayName = (nickname && nickname !== "undefined" && nickname !== "") ? nickname : peerID;
+
+            const headerHtml = `
+                <div class="flex flex-col">
+                    <span class="font-bold text-slate-200">${displayName}</span>
+                    ${nickname ? `<span class="text-[10px] font-mono text-slate-500">${peerID}</span>` : ''}
+                </div>
+            `;
+
+            document.getElementById('active-chat-peer').innerHTML = headerHtml;
             document.getElementById('header-status-dot').classList.remove('bg-slate-600');
             document.getElementById('header-status-dot').classList.add('bg-emerald-500', 'shadow-[0_0_8px_rgba(16,185,129,0.5)]');
 
             const input = document.getElementById('chat-input');
             input.disabled = false;
-            input.placeholder = `Message ${peerID.substring(0,16)}...`;
+            input.placeholder = `Message ${displayName}...`;
             input.focus();
 
             const btn = document.getElementById('chat-send-btn');
@@ -190,7 +228,6 @@
                     const bg = isMe ? 'bg-cyan-900/20 border-cyan-800/50 text-cyan-100 rounded-tr-none' : 'bg-slate-800 border-slate-700 text-slate-200 rounded-tl-none';
                     const time = new Date(m.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
 
-                    // Status Icons
                     let statusIcon = '';
                     if (isMe) {
                         if (m.status === 'sent') statusIcon = '<span class="text-emerald-500 text-[10px]">✓</span>';

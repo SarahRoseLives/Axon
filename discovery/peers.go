@@ -11,10 +11,11 @@ import (
 
 type Peer struct {
 	OnionAddress string    `json:"onion_address"`
+	Nickname     string    `json:"nickname"` // <--- NEW
 	TrustLevel   string    `json:"trust_level"`
 	LastSeen     time.Time `json:"last_seen"`
-	PublicKey    string    `json:"public_key"` // Hex Encoded X25519 Key
-	Status       string    `json:"status"`     // <--- Added back to fix the error
+	PublicKey    string    `json:"public_key"`
+	Status       string    `json:"status"`
 }
 
 type PeerManager struct {
@@ -48,8 +49,8 @@ func (pm *PeerManager) GetPublicKey(onion string) string {
 	return ""
 }
 
-// AddPeer adds or updates a peer in the list
-func (pm *PeerManager) AddPeer(onion, trust, pubKey string) {
+// Update AddPeer to accept Nickname
+func (pm *PeerManager) AddPeer(onion, trust, pubKey, nickname string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -58,18 +59,20 @@ func (pm *PeerManager) AddPeer(onion, trust, pubKey string) {
 		p = Peer{
 			OnionAddress: onion,
 			TrustLevel:   trust,
-			Status:       "unknown", // This line caused the error, but now it is valid
+			Status:       "unknown",
 		}
 	}
 
 	p.LastSeen = time.Now()
 
-	// Update Key if provided
 	if pubKey != "" {
 		p.PublicKey = pubKey
 	}
+	// Always update nickname if provided
+	if nickname != "" {
+		p.Nickname = nickname
+	}
 
-	// Upgrade trust from unknown to direct/transitive
 	if p.TrustLevel == "unknown" && trust != "unknown" {
 		p.TrustLevel = trust
 	}
@@ -77,8 +80,8 @@ func (pm *PeerManager) AddPeer(onion, trust, pubKey string) {
 	pm.KnownPeers[onion] = p
 	pm.savePeersInternal()
 
-	if !exists || (pubKey != "" && pubKey != p.PublicKey) {
-		fmt.Printf("🔭 Peer Updated: %s (Key: %v)\n", onion, pubKey != "")
+	if !exists || (pubKey != "" && pubKey != p.PublicKey) || (nickname != "" && nickname != p.Nickname) {
+		fmt.Printf("🔭 Peer Updated: %s (%s)\n", onion, p.Nickname)
 	}
 }
 
@@ -92,7 +95,6 @@ func (pm *PeerManager) GetPeers() []Peer {
 	return peers
 }
 
-// Persistence
 func (pm *PeerManager) LoadPeers() {
 	path := filepath.Join(pm.DataDir, "peers.json")
 	data, err := os.ReadFile(path)

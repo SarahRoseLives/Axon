@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-// StartOutboxLoop periodically checks for pending messages and tries to send them
-func StartOutboxLoop(torCtrl *tor.Controller, pm *discovery.PeerManager, chatMgr *chat.Manager) {
+// Updated: Now requires getNickname closure so retries always use latest name
+func StartOutboxLoop(torCtrl *tor.Controller, pm *discovery.PeerManager, chatMgr *chat.Manager, getNickname func() string) {
 	go func() {
 		for {
 			time.Sleep(60 * time.Second)
@@ -28,22 +28,23 @@ func StartOutboxLoop(torCtrl *tor.Controller, pm *discovery.PeerManager, chatMgr
 				if len(msgs) > 0 {
 					msg := msgs[0]
 					fmt.Printf("   -> Retrying msg to %s\n", peerID)
-					AttemptSendMessage(torCtrl, pm, chatMgr, peerID, msg)
+					// Pass current nickname
+					AttemptSendMessage(torCtrl, pm, chatMgr, peerID, msg, getNickname())
 				}
 			}
 		}
 	}()
 }
 
-// AttemptSendMessage tries to encrypt and send a message over Tor.
-// Returns true if successful.
-func AttemptSendMessage(torCtrl *tor.Controller, pm *discovery.PeerManager, chatMgr *chat.Manager, targetPeer string, msg chat.Message) bool {
+// Updated: Now accepts myNickname to pass to PerformHandshake if needed
+func AttemptSendMessage(torCtrl *tor.Controller, pm *discovery.PeerManager, chatMgr *chat.Manager, targetPeer string, msg chat.Message, myNickname string) bool {
 
 	// 1. Get Key
 	peerKeyHex := pm.GetPublicKey(targetPeer)
 	if peerKeyHex == "" {
 		// Try to handshake so next time it might work
-		go PerformHandshake(torCtrl, pm, targetPeer, chatMgr.GetMyPublicKey())
+		// FIXED: Passing myNickname here
+		go PerformHandshake(torCtrl, pm, targetPeer, chatMgr.GetMyPublicKey(), myNickname)
 		return false
 	}
 

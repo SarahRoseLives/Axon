@@ -4,19 +4,39 @@
         <div class="flex items-start justify-between mb-6">
             <div>
                 <h3 class="text-xl font-medium text-white mb-1">Peer Identity</h3>
-                <p class="text-slate-500 text-sm">Your Identity on the Mesh</p>
+                <p class="text-slate-500 text-sm">How you appear to others on the mesh.</p>
+            </div>
+            <div class="w-16 h-16 rounded-full bg-slate-800 border-2 border-cyan-500 flex items-center justify-center shadow-lg shadow-cyan-900/20">
+                <i data-lucide="user" class="w-8 h-8 text-cyan-500"></i>
             </div>
         </div>
 
         <div class="space-y-4">
+            <div class="bg-black/30 p-4 rounded-lg border border-slate-800">
+                <label class="text-[10px] text-slate-500 uppercase tracking-widest block mb-2">Display Name</label>
+                <div class="flex gap-3">
+                    <input
+                        id="identity-nickname-input"
+                        type="text"
+                        value="{{ .Nickname }}"
+                        placeholder="Anonymous"
+                        class="flex-1 bg-slate-900 border border-slate-700 rounded-md px-3 py-2 text-sm text-cyan-400 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 outline-none transition-all"
+                    >
+                    <button onclick="saveNickname()" class="bg-cyan-600 hover:bg-cyan-500 text-white px-6 py-2 rounded-md text-sm font-medium transition-colors shadow-lg shadow-cyan-900/20">
+                        Save
+                    </button>
+                </div>
+                <p class="text-xs text-slate-600 mt-2">This name is shared with peers when you handshake.</p>
+            </div>
+
             <div class="bg-black/30 p-4 rounded-lg border border-slate-800 font-mono text-sm">
                 <label class="text-[10px] text-slate-500 uppercase tracking-widest block mb-1">Your Onion Address</label>
-                <div class="text-cyan-400 break-all select-all">{{ .OnionAddr }}</div>
+                <div class="text-slate-400 break-all select-all">{{ .OnionAddr }}</div>
             </div>
 
             <div class="bg-black/30 p-4 rounded-lg border border-slate-800 font-mono text-sm">
                 <label class="text-[10px] text-slate-500 uppercase tracking-widest block mb-1">Client Version</label>
-                <div class="text-slate-400">{{ .AppVersion }}</div>
+                <div class="text-slate-600">{{ .AppVersion }}</div>
             </div>
         </div>
     </div>
