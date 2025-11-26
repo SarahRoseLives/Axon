@@ -56,18 +56,13 @@
             } catch(e) { alert("Error updating block status."); }
         }
 
-        // --- RENDERERS ---
-
-        // 1. Update the "Trusted Neighbors" Table
+        // --- Render Peer Table ---
         function renderPeerList(peers) {
             const container = document.getElementById('peer-list-container');
             if (!container) return;
 
             if (peers.length === 0) {
-                container.innerHTML = `
-                    <div class="p-8 text-center text-slate-500 text-sm">
-                        No peers found. Click the <i data-lucide="user-plus" class="w-4 h-4 inline mx-1"></i> icon above to add one.
-                    </div>`;
+                container.innerHTML = `<div class="p-8 text-center text-slate-500 text-sm">No peers found. Click the <i data-lucide="user-plus" class="w-4 h-4 inline mx-1"></i> icon above to add one.</div>`;
                 lucide.createIcons();
                 return;
             }
@@ -79,12 +74,14 @@
                 const blockedClass = p.blocked ? "opacity-50 grayscale" : "";
                 const blockedText = p.blocked ? '<span class="text-red-500 text-[10px] ml-2">BLOCKED</span>' : "";
 
+                // NEW: Show who introduced them
+                const introText = p.introduced_by ? `<div class="text-[10px] text-slate-600 mt-0.5">via ${p.introduced_by.substring(0,8)}...</div>` : "";
+
                 return `
                 <div class="grid grid-cols-12 gap-4 text-sm py-3 px-2 border-b border-slate-800/50 hover:bg-slate-800/50 cursor-pointer transition-colors group ${blockedClass}" onclick="openChat('${p.onion_address}', '${p.nickname}')">
                     <div class="col-span-6 font-mono text-slate-400 truncate group-hover:text-cyan-400" title="${p.onion_address}">
-                        ${displayName}
-                        ${blockedText}
-                        ${p.nickname ? `<span class="text-slate-600 text-[10px] ml-1 hidden group-hover:inline">${p.onion_address.substring(0,8)}...</span>` : ''}
+                        ${displayName} ${blockedText}
+                        ${introText}
                     </div>
                     <div class="col-span-3 flex items-center gap-1 text-slate-400">
                         <i data-lucide="shield" class="w-3 h-3 text-emerald-500"></i> ${p.trust_level}
@@ -92,18 +89,16 @@
                     <div class="col-span-3 text-right text-slate-500 text-xs">
                         ${timeStr}
                     </div>
-                </div>
-                `;
+                </div>`;
             }).join('');
 
-            // Simple diff check to avoid redrawing if nothing changed (prevents scroll jumping)
             if (container.innerHTML.length !== html.length) {
                 container.innerHTML = html;
                 lucide.createIcons();
             }
         }
 
-        // 2. Update Chat Sidebar
+        // --- Render Chat Sidebar ---
         function renderChatSidebar(peers, chatStatusMap) {
             const container = document.getElementById('chat-peer-list');
             if (!container) return;
@@ -130,7 +125,6 @@
 
                 const snippet = status.snippet || "No messages yet";
                 const snippetClass = status.unread ? 'text-slate-200 font-medium' : 'text-slate-500';
-
                 const displayName = p.nickname || p.onion_address;
                 const blockedIcon = p.blocked ? '<i data-lucide="ban" class="w-3 h-3 text-amber-500 ml-1"></i>' : '';
 
@@ -154,7 +148,7 @@
             }
         }
 
-        // 3. Update Topology Map
+        // --- Render Topology Map (UPDATED) ---
         function renderTopology(peers, selfAddress) {
             const nodesContainer = document.getElementById('topology-nodes');
             const svg = document.getElementById('topology-svg');
@@ -164,6 +158,22 @@
             const w = container.clientWidth; const h = container.clientHeight;
             const cx = w / 2; const cy = h / 2; const radius = Math.min(w, h) / 3.5;
 
+            // 1. Map Coordinates so we can look them up
+            const coords = {};
+
+            if (peers.length > 0) {
+                const angleStep = (2 * Math.PI) / peers.length;
+                peers.forEach((peer, index) => {
+                    const angle = index * angleStep;
+                    coords[peer.onion_address] = {
+                        x: cx + radius * Math.cos(angle),
+                        y: cy + radius * Math.sin(angle),
+                        data: peer
+                    };
+                });
+            }
+
+            // 2. Draw Self Node
             let html = `
                 <div class="absolute transform -translate-x-1/2 -translate-y-1/2 flex flex-col items-center justify-center pointer-events-auto" style="left: ${cx}px; top: ${cy}px">
                      <div class="w-16 h-16 rounded-full bg-slate-900 border-2 border-cyan-500 z-10 flex items-center justify-center shadow-[0_0_20px_rgba(6,182,212,0.3)]">
@@ -175,72 +185,74 @@
 
             svg.innerHTML = '';
 
-            if (peers.length > 0) {
-                const angleStep = (2 * Math.PI) / peers.length;
-                peers.forEach((peer, index) => {
-                    const angle = index * angleStep;
-                    const px = cx + radius * Math.cos(angle);
-                    const py = cy + radius * Math.sin(angle);
-                    const isDirect = peer.trust_level === 'direct' || peer.trust_level === 'neighbor';
+            // 3. Draw Peer Nodes & Lines
+            Object.values(coords).forEach(item => {
+                const px = item.x;
+                const py = item.y;
+                const p = item.data;
+                const isDirect = p.trust_level === 'direct' || p.trust_level === 'neighbor';
 
-                    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-                    line.setAttribute("x1", cx); line.setAttribute("y1", cy);
-                    line.setAttribute("x2", px); line.setAttribute("y2", py);
+                // Determine Line Target
+                // Default: Center (You)
+                let tx = cx;
+                let ty = cy;
 
-                    const strokeColor = peer.blocked ? "#ef4444" : (isDirect ? "#10b981" : "#f59e0b");
+                // IF they were introduced by someone who is ALSO on the map, draw line to them
+                if (p.introduced_by && coords[p.introduced_by]) {
+                    tx = coords[p.introduced_by].x;
+                    ty = coords[p.introduced_by].y;
+                }
 
-                    line.setAttribute("stroke", strokeColor);
-                    line.setAttribute("stroke-width", "1");
-                    line.setAttribute("stroke-opacity", "0.3");
-                    if (!isDirect) line.setAttribute("stroke-dasharray", "4,4");
-                    svg.appendChild(line);
+                // Draw Line
+                const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+                line.setAttribute("x1", tx); line.setAttribute("y1", ty);
+                line.setAttribute("x2", px); line.setAttribute("y2", py);
 
-                    const borderColor = peer.blocked ? 'border-red-500' : (isDirect ? 'border-emerald-500' : 'border-amber-500');
-                    const textColor = peer.blocked ? 'text-red-500' : (isDirect ? 'text-emerald-500' : 'text-amber-500');
-                    const icon = peer.blocked ? 'ban' : (isDirect ? 'shield' : 'share-2');
-                    const label = peer.nickname || peer.onion_address.substring(0,8)+"...";
+                const strokeColor = p.blocked ? "#ef4444" : (isDirect ? "#10b981" : "#f59e0b");
+                line.setAttribute("stroke", strokeColor);
+                line.setAttribute("stroke-width", "1");
+                line.setAttribute("stroke-opacity", "0.3");
+                if (!isDirect && !p.introduced_by) line.setAttribute("stroke-dasharray", "4,4");
+                svg.appendChild(line);
 
-                    html += `
-                    <div onclick="openChat('${peer.onion_address}', '${peer.nickname}')" class="absolute transform -translate-x-1/2 -translate-y-1/2 flex flex-col items-center justify-center pointer-events-auto cursor-pointer hover:scale-110 transition-transform duration-200" style="left: ${px}px; top: ${py}px" title="${peer.onion_address}">
-                         <div class="w-12 h-12 rounded-full bg-slate-900 border-2 ${borderColor} z-10 flex items-center justify-center shadow-lg">
-                            <i data-lucide="${icon}" class="w-5 h-5 ${textColor}"></i>
-                         </div>
-                         <div class="mt-2 text-[10px] font-mono text-slate-400 bg-black/50 px-2 py-0.5 rounded border border-slate-800 whitespace-nowrap">${label}</div>
-                    </div>`;
-                });
-            }
+                const borderColor = p.blocked ? 'border-red-500' : (isDirect ? 'border-emerald-500' : 'border-amber-500');
+                const textColor = p.blocked ? 'text-red-500' : (isDirect ? 'text-emerald-500' : 'text-amber-500');
+                const icon = p.blocked ? 'ban' : (isDirect ? 'shield' : 'share-2');
+                const label = p.nickname || p.onion_address.substring(0,8)+"...";
+
+                html += `
+                <div onclick="openChat('${p.onion_address}', '${p.nickname}')" class="absolute transform -translate-x-1/2 -translate-y-1/2 flex flex-col items-center justify-center pointer-events-auto cursor-pointer hover:scale-110 transition-transform duration-200" style="left: ${px}px; top: ${py}px" title="${p.onion_address}\nIntro: ${p.introduced_by || 'Direct'}">
+                     <div class="w-12 h-12 rounded-full bg-slate-900 border-2 ${borderColor} z-10 flex items-center justify-center shadow-lg">
+                        <i data-lucide="${icon}" class="w-5 h-5 ${textColor}"></i>
+                     </div>
+                     <div class="mt-2 text-[10px] font-mono text-slate-400 bg-black/50 px-2 py-0.5 rounded border border-slate-800 whitespace-nowrap">${label}</div>
+                </div>`;
+            });
+
             nodesContainer.innerHTML = html;
             lucide.createIcons();
         }
+
+        // ... (Chat Actions, Global Poller, Navigation, etc. remain same as previous answer) ...
+        // Just ensure you copy the full script from the previous response for the parts below renderTopology
 
         // --- Chat Actions ---
         function openChat(peerID, nickname) {
             activePeer = peerID;
             switchTab('chat');
-
             const displayName = (nickname && nickname !== "undefined" && nickname !== "") ? nickname : peerID;
-
-            const headerHtml = `
-                <div class="flex flex-col">
-                    <span class="font-bold text-slate-200">${displayName}</span>
-                    ${nickname ? `<span class="text-[10px] font-mono text-slate-500">${peerID}</span>` : ''}
-                </div>
-            `;
-
+            const headerHtml = `<div class="flex flex-col"><span class="font-bold text-slate-200">${displayName}</span>${nickname ? `<span class="text-[10px] font-mono text-slate-500">${peerID}</span>` : ''}</div>`;
             document.getElementById('active-chat-peer').innerHTML = headerHtml;
             document.getElementById('header-status-dot').classList.remove('bg-slate-600');
             document.getElementById('header-status-dot').classList.add('bg-emerald-500', 'shadow-[0_0_8px_rgba(16,185,129,0.5)]');
-
             const input = document.getElementById('chat-input');
             input.disabled = false;
             input.placeholder = `Message ${displayName}...`;
             input.focus();
-
             const btn = document.getElementById('chat-send-btn');
             btn.disabled = false;
             btn.classList.remove('bg-cyan-900', 'text-slate-500', 'cursor-not-allowed');
             btn.classList.add('bg-cyan-600', 'text-white', 'hover:bg-cyan-500');
-
             pollChat();
         }
 
@@ -251,7 +263,6 @@
             const text = input.value.trim();
             if(!text) return;
             input.value = '';
-
             try {
                 await fetch('/api/chat/send', {
                     method: 'POST',
@@ -264,41 +275,27 @@
 
         async function pollChat() {
             if (!activePeer || document.getElementById('view-chat').classList.contains('hidden')) return;
-
             try {
                 const res = await fetch(`/api/chat/history?peer=${activePeer}`);
                 const msgs = await res.json();
-
                 const container = document.getElementById('chat-messages');
                 if(!container) return;
-
                 if(msgs.length === 0) {
                     container.innerHTML = `<div class="text-center mt-10 text-slate-600 text-xs">Start a conversation...</div>`;
                     return;
                 }
-
                 const html = msgs.map(m => {
                     const isMe = !m.incoming;
                     const align = isMe ? 'items-end' : 'items-start';
                     const bg = isMe ? 'bg-cyan-900/20 border-cyan-800/50 text-cyan-100 rounded-tr-none' : 'bg-slate-800 border-slate-700 text-slate-200 rounded-tl-none';
                     const time = new Date(m.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-
                     let statusIcon = '';
                     if (isMe) {
                         if (m.status === 'sent') statusIcon = '<span class="text-emerald-500 text-[10px]">✓</span>';
                         else if (m.status === 'pending') statusIcon = '<span class="text-slate-500 text-[10px]">🕒</span>';
                     }
-
-                    return `
-                    <div class="flex flex-col ${align}">
-                        <div class="max-w-[70%] p-3 rounded-lg text-sm border ${bg}">${m.content}</div>
-                        <div class="flex items-center gap-2 mt-1 px-1">
-                            <span class="text-[10px] text-slate-600 font-mono">${time}</span>
-                            ${statusIcon}
-                        </div>
-                    </div>`;
+                    return `<div class="flex flex-col ${align}"><div class="max-w-[70%] p-3 rounded-lg text-sm border ${bg}">${m.content}</div><div class="flex items-center gap-2 mt-1 px-1"><span class="text-[10px] text-slate-600 font-mono">${time}</span>${statusIcon}</div></div>`;
                 }).join('');
-
                 if (container.innerHTML.length !== html.length) {
                     container.innerHTML = html;
                     container.scrollTop = container.scrollHeight;
@@ -306,13 +303,11 @@
             } catch(e) { console.error(e); }
         }
 
-        // --- GLOBAL POLLER ---
         setInterval(async () => {
             try {
                 const resPeers = await fetch('/api/peers');
                 if (!resPeers.ok) return;
                 const dataPeers = await resPeers.json();
-
                 globalPeerData = dataPeers.peers || [];
                 const peers = globalPeerData;
                 const selfAddr = dataPeers.self || "";
@@ -320,7 +315,6 @@
                 const resStatus = await fetch('/api/chat/status');
                 let chatStatusMap = {};
                 let totalUnread = 0;
-
                 if (resStatus.ok) {
                     const statusData = await resStatus.json() || [];
                     statusData.forEach(s => {
@@ -334,7 +328,7 @@
                      const hud = document.getElementById('hud-node-count');
                      if(hud) hud.innerText = peers.length + 1;
                      renderTopology(peers, selfAddr);
-                     renderPeerList(peers); // <--- FIXED: Now updates the table!
+                     renderPeerList(peers);
                 }
 
                 const chatView = document.getElementById('view-chat');
@@ -347,13 +341,10 @@
                     if (totalUnread > 0) badge.classList.remove('hidden');
                     else badge.classList.add('hidden');
                 }
-
                 pollChat();
-
             } catch(e) { console.error("Poll cycle failed", e); }
         }, 1500);
 
-        // --- Navigation ---
         function switchTab(tabId) {
             document.querySelectorAll('.nav-btn').forEach(btn => {
                 const isActive = btn.dataset.target === tabId;

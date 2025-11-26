@@ -11,20 +11,18 @@ import (
 	"time"
 )
 
-// Updated Protocol Structs
 type HandshakeRequest struct {
 	OnionAddress string `json:"onion_address"`
 	PublicKey    string `json:"public_key"`
-	Nickname     string `json:"nickname"` // <--- NEW
+	Nickname     string `json:"nickname"`
 }
 
 type PeerListResponse struct {
 	Peers     []string `json:"peers"`
 	PublicKey string   `json:"public_key"`
-	Nickname  string   `json:"nickname"` // <--- NEW
+	Nickname  string   `json:"nickname"`
 }
 
-// StartBackgroundTasks now needs 'getNickname' func to always send fresh name
 func StartBackgroundTasks(torCtrl *tor.Controller, pm *discovery.PeerManager, myPubKey string, getNickname func() string) {
 	go func() {
 		time.Sleep(30 * time.Second)
@@ -43,18 +41,14 @@ func StartBackgroundTasks(torCtrl *tor.Controller, pm *discovery.PeerManager, my
 }
 
 func PerformHandshake(torCtrl *tor.Controller, pm *discovery.PeerManager, target string, myPubKey, myNickname string) {
-	if torCtrl.Onion == nil {
-		return
-	}
+	if torCtrl.Onion == nil { return }
 	client, err := torCtrl.GetHttpClient()
-	if err != nil {
-		return
-	}
+	if err != nil { return }
 
 	payload := HandshakeRequest{
 		OnionAddress: torCtrl.Onion.ID + ".onion",
 		PublicKey:    myPubKey,
-		Nickname:     myNickname, // <--- Send our name
+		Nickname:     myNickname,
 	}
 	jsonBytes, _ := json.Marshal(payload)
 
@@ -70,15 +64,19 @@ func PerformHandshake(torCtrl *tor.Controller, pm *discovery.PeerManager, target
 				var response PeerListResponse
 				if err := json.NewDecoder(resp.Body).Decode(&response); err == nil {
 
-					// Save their Key AND Nickname
+					// 1. Update the Target Peer (Direct Trust)
+					// IntroducedBy is empty because we contacted them directly
 					if response.PublicKey != "" {
-						pm.AddPeer(target, "direct", response.PublicKey, response.Nickname)
+						pm.AddPeer(target, "direct", response.PublicKey, response.Nickname, "")
 					}
 
+					// 2. Process Gossip (Transitive Trust)
+					// IntroducedBy is 'target' because they gave us this list
 					for _, p := range response.Peers {
 						clean := Sanitize(p)
 						if clean != payload.OnionAddress && !pm.HasPeer(clean) {
-							pm.AddPeer(clean, "transitive", "", "")
+							// <--- HERE IS THE MAGIC: We pass 'target' as introducedBy
+							pm.AddPeer(clean, "transitive", "", "", target)
 						}
 					}
 				}

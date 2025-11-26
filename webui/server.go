@@ -30,7 +30,6 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 	}
 
 	profileMgr := identity.NewProfileManager(dataDir)
-
 	getNick := func() string { return profileMgr.GetNickname() }
 
 	StartBackgroundTasks(torCtrl, pm, chatMgr.GetMyPublicKey(), getNick)
@@ -49,7 +48,7 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 			onion = torCtrl.Onion.ID + ".onion"
 		}
 		data := UIContext{
-			AppVersion: "0.9.13 (Peer Mgmt)",
+			AppVersion: "0.9.14 (Trust Trails)",
 			OnionAddr:  onion,
 			Status:     status,
 			Peers:      pm.GetPeers(),
@@ -59,13 +58,11 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 		tmpl.ExecuteTemplate(w, "index.html", data)
 	})
 
-	// --- MANAGEMENT APIs ---
-
+	// Management
 	http.HandleFunc("/api/peers/delete", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost { return }
 		var req struct { OnionAddress string `json:"onion_address"` }
 		json.NewDecoder(r.Body).Decode(&req)
-
 		if req.OnionAddress != "" {
 			pm.RemovePeer(req.OnionAddress)
 			chatMgr.DeleteConversation(req.OnionAddress)
@@ -77,16 +74,12 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 		if r.Method != http.MethodPost { return }
 		var req struct { OnionAddress string `json:"onion_address"` }
 		json.NewDecoder(r.Body).Decode(&req)
-
 		blocked := false
-		if req.OnionAddress != "" {
-			blocked = pm.ToggleBlock(req.OnionAddress)
-		}
+		if req.OnionAddress != "" { blocked = pm.ToggleBlock(req.OnionAddress) }
 		json.NewEncoder(w).Encode(map[string]bool{"blocked": blocked})
 	})
 
-	// --- EXISTING APIs ---
-
+	// Identity & Peers
 	http.HandleFunc("/api/identity", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			var req struct { Nickname string `json:"nickname"` }
@@ -115,7 +108,10 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 		target := Sanitize(req.OnionAddress)
 		if target == "" { return }
 		if torCtrl.Onion != nil && target == torCtrl.Onion.ID + ".onion" { return }
-		if !pm.HasPeer(target) { pm.AddPeer(target, "direct", "", "") }
+
+		if !pm.HasPeer(target) {
+			pm.AddPeer(target, "direct", "", "", "") // Manual add = no introducer
+		}
 		go PerformHandshake(torCtrl, pm, target, chatMgr.GetMyPublicKey(), profileMgr.GetNickname())
 		w.Write([]byte(`{"status":"success"}`))
 	})
@@ -127,15 +123,15 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 		from := Sanitize(req.OnionAddress)
 		if from == "" { return }
 
-		// BLOCK CHECK
 		if pm.IsBlocked(from) {
-			fmt.Printf("🛑 Blocked handshake attempt from %s\n", from)
 			http.Error(w, "Blocked", 403)
 			return
 		}
 
 		fmt.Printf("👋 Handshake from %s (%s)\n", from, req.Nickname)
-		pm.AddPeer(from, "neighbor", req.PublicKey, req.Nickname)
+		// They contacted us directly, so IntroducedBy is empty
+		pm.AddPeer(from, "neighbor", req.PublicKey, req.Nickname, "")
+
 		knownPeers := pm.GetPeers()
 		var peerList []string
 		for _, p := range knownPeers { peerList = append(peerList, p.OnionAddress) }
@@ -147,6 +143,7 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 		})
 	})
 
+	// Chat
 	http.HandleFunc("/api/chat/history", func(w http.ResponseWriter, r *http.Request) {
 		peer := r.URL.Query().Get("peer")
 		msgs := chatMgr.GetHistory(peer)
@@ -185,14 +182,8 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 		if r.Method != http.MethodPost { return }
 		var wireMsg chat.WireMessage
 		if err := json.NewDecoder(r.Body).Decode(&wireMsg); err != nil { return }
-
 		from := Sanitize(wireMsg.From)
-
-		// BLOCK CHECK
-		if pm.IsBlocked(from) {
-			fmt.Printf("🛑 Dropped message from blocked peer %s\n", from)
-			return
-		}
+		if pm.IsBlocked(from) { return }
 
 		peerKeyHex := pm.GetPublicKey(from)
 		if peerKeyHex == "" {

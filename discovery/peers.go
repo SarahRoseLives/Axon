@@ -12,11 +12,12 @@ import (
 type Peer struct {
 	OnionAddress string    `json:"onion_address"`
 	Nickname     string    `json:"nickname"`
+	IntroducedBy string    `json:"introduced_by"` // <--- NEW FIELD
 	TrustLevel   string    `json:"trust_level"`
 	LastSeen     time.Time `json:"last_seen"`
 	PublicKey    string    `json:"public_key"`
 	Status       string    `json:"status"`
-	Blocked      bool      `json:"blocked"` // <--- NEW
+	Blocked      bool      `json:"blocked"`
 }
 
 type PeerManager struct {
@@ -89,7 +90,8 @@ func (pm *PeerManager) ToggleBlock(onion string) bool {
 
 // --- STANDARD LOGIC ---
 
-func (pm *PeerManager) AddPeer(onion, trust, pubKey, nickname string) {
+// Updated Signature: Now accepts 'introducedBy'
+func (pm *PeerManager) AddPeer(onion, trust, pubKey, nickname, introducedBy string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -103,15 +105,17 @@ func (pm *PeerManager) AddPeer(onion, trust, pubKey, nickname string) {
 		}
 	}
 
-	// If blocked, do not update metadata (shadowban logic)
-	if p.Blocked {
-		return
-	}
+	if p.Blocked { return }
 
 	p.LastSeen = time.Now()
 
 	if pubKey != "" { p.PublicKey = pubKey }
 	if nickname != "" { p.Nickname = nickname }
+
+	// Only set IntroducedBy if it's new (don't overwrite existing history)
+	if introducedBy != "" && p.IntroducedBy == "" {
+		p.IntroducedBy = introducedBy
+	}
 
 	if p.TrustLevel == "unknown" && trust != "unknown" {
 		p.TrustLevel = trust
@@ -119,6 +123,13 @@ func (pm *PeerManager) AddPeer(onion, trust, pubKey, nickname string) {
 
 	pm.KnownPeers[onion] = p
 	pm.savePeersInternal()
+
+	// Log if new
+	if !exists {
+		source := "Manually"
+		if p.IntroducedBy != "" { source = "via " + p.IntroducedBy }
+		fmt.Printf("🔭 Peer Added: %s (%s)\n", onion, source)
+	}
 }
 
 func (pm *PeerManager) GetPeers() []Peer {
