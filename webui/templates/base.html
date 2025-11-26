@@ -1,0 +1,85 @@
+{{ define "base" }}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AXON // Mesh Network</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #06b6d4; }
+        .pattern-dots {
+            background-image: radial-gradient(#334155 1px, transparent 1px);
+            background-size: 8px 8px;
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-200 font-sans selection:bg-cyan-900 selection:text-cyan-100 overflow-hidden h-screen w-full flex">
+
+    {{ template "content" . }}
+
+    <script>
+        lucide.createIcons();
+
+        // --- Tab Switching Logic ---
+        function switchTab(tabId) {
+            // Update Sidebar
+            document.querySelectorAll('.nav-btn').forEach(btn => {
+                if(btn.dataset.target === tabId) {
+                    btn.classList.add('bg-cyan-950/30', 'text-cyan-400', 'border-cyan-900/50');
+                    btn.classList.remove('text-slate-400', 'hover:text-slate-200', 'border-transparent');
+                } else {
+                    btn.classList.remove('bg-cyan-950/30', 'text-cyan-400', 'border-cyan-900/50');
+                    btn.classList.add('text-slate-400', 'hover:text-slate-200', 'border-transparent');
+                }
+            });
+
+            // Update Views
+            document.querySelectorAll('.view-section').forEach(view => {
+                if(view.id === `view-${tabId}`) {
+                    view.classList.remove('hidden');
+                } else {
+                    view.classList.add('hidden');
+                }
+            });
+
+            // Update Header Title
+            const titles = {
+                'network': 'Network Topology',
+                'chat': 'Secure Channel',
+                'identity': 'Node Identity'
+            };
+            document.getElementById('header-title').innerText = titles[tabId];
+        }
+
+        // --- API: Add Peer ---
+        async function promptAddPeer() {
+            const onion = prompt("Enter Peer Onion Address (e.g., vngrd...a2s1.onion):");
+            if (!onion) return;
+
+            try {
+                const response = await fetch('/api/peers/add', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ onion_address: onion })
+                });
+
+                if (response.ok) {
+                    alert("Peer added! Refreshing...");
+                    window.location.reload();
+                } else {
+                    alert("Failed to add peer.");
+                }
+            } catch (e) {
+                console.error(e);
+                alert("Error connecting to node.");
+            }
+        }
+    </script>
+</body>
+</html>
+{{ end }}

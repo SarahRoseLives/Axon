@@ -1,0 +1,34 @@
+{{ define "sidebar" }}
+<div class="w-20 md:w-64 flex flex-col border-r border-slate-800 bg-slate-900">
+    <div class="h-16 flex items-center justify-center md:justify-start md:px-6 border-b border-slate-800">
+        <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center shadow-lg shadow-cyan-900/20">
+            <i data-lucide="network" class="text-white w-5 h-5"></i>
+        </div>
+        <span class="hidden md:block ml-3 font-bold text-xl tracking-tight">AXON</span>
+    </div>
+
+    <nav class="flex-1 py-6 space-y-2 px-3">
+        <button onclick="switchTab('network')" class="nav-btn active w-full flex items-center gap-3 px-3 py-2 rounded-md transition-all bg-cyan-950/30 text-cyan-400 border border-cyan-900/50" data-target="network">
+            <i data-lucide="network" class="w-5 h-5"></i>
+            <span class="hidden md:block font-medium text-sm">Topology</span>
+        </button>
+        <button onclick="switchTab('chat')" class="nav-btn w-full flex items-center gap-3 px-3 py-2 rounded-md transition-all text-slate-400 hover:text-slate-200 border border-transparent" data-target="chat">
+            <i data-lucide="message-square" class="w-5 h-5"></i>
+            <span class="hidden md:block font-medium text-sm">Comms</span>
+        </button>
+        <button onclick="switchTab('identity')" class="nav-btn w-full flex items-center gap-3 px-3 py-2 rounded-md transition-all text-slate-400 hover:text-slate-200 border border-transparent" data-target="identity">
+            <i data-lucide="shield" class="w-5 h-5"></i>
+            <span class="hidden md:block font-medium text-sm">Identity</span>
+        </button>
+    </nav>
+
+    <div class="p-4 border-t border-slate-800">
+        <div class="flex items-center gap-3">
+            <div class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
+            <span class="hidden md:block text-xs font-mono text-slate-400 truncate w-full">
+                Status: {{ .Status }}
+            </span>
+        </div>
+    </div>
+</div>
+{{ end }}

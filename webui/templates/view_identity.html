@@ -1,0 +1,24 @@
+{{ define "view_identity" }}
+<div id="view-identity" class="view-section hidden max-w-3xl mx-auto p-8">
+    <div class="bg-slate-900/50 border border-slate-800 rounded-xl p-6 mb-6">
+        <div class="flex items-start justify-between mb-6">
+            <div>
+                <h3 class="text-xl font-medium text-white mb-1">Peer Identity</h3>
+                <p class="text-slate-500 text-sm">Your Identity on the Mesh</p>
+            </div>
+        </div>
+
+        <div class="space-y-4">
+            <div class="bg-black/30 p-4 rounded-lg border border-slate-800 font-mono text-sm">
+                <label class="text-[10px] text-slate-500 uppercase tracking-widest block mb-1">Your Onion Address</label>
+                <div class="text-cyan-400 break-all select-all">{{ .OnionAddr }}</div>
+            </div>
+
+            <div class="bg-black/30 p-4 rounded-lg border border-slate-800 font-mono text-sm">
+                <label class="text-[10px] text-slate-500 uppercase tracking-widest block mb-1">Client Version</label>
+                <div class="text-slate-400">{{ .AppVersion }}</div>
+            </div>
+        </div>
+    </div>
+</div>
+{{ end }}

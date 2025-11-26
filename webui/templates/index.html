@@ -1,0 +1,28 @@
+{{ template "base" . }}
+
+{{ define "content" }}
+    {{ template "sidebar" . }}
+
+    <div class="flex-1 flex flex-col min-w-0">
+        <header class="h-16 border-b border-slate-800 bg-slate-950/50 backdrop-blur flex items-center justify-between px-6">
+            <div>
+                <h2 id="header-title" class="text-lg font-medium text-slate-100">Network Topology</h2>
+                <p class="text-xs text-slate-500 font-mono flex items-center gap-2">
+                   {{ .OnionAddr }}
+                </p>
+            </div>
+
+            <div class="flex items-center gap-4">
+                <button onclick="promptAddPeer()" class="p-2 text-slate-400 hover:text-cyan-400 transition-colors" title="Add Peer">
+                    <i data-lucide="user-plus" class="w-5 h-5"></i>
+                </button>
+            </div>
+        </header>
+
+        <main class="flex-1 relative overflow-hidden bg-slate-950">
+            {{ template "view_network" . }}
+            {{ template "view_chat" . }}
+            {{ template "view_identity" . }}
+        </main>
+    </div>
+{{ end }}

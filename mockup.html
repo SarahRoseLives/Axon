@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AXON // Mesh Network</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        /* Custom scrollbar for cyber aesthetic */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #0f172a;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #334155;
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #06b6d4;
+        }
+        .pattern-dots {
+            background-image: radial-gradient(#334155 1px, transparent 1px);
+            background-size: 8px 8px;
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-200 font-sans selection:bg-cyan-900 selection:text-cyan-100 overflow-hidden h-screen w-full flex">
+
+    <!-- Sidebar -->
+    <div class="w-20 md:w-64 flex flex-col border-r border-slate-800 bg-slate-900">
+        <div class="h-16 flex items-center justify-center md:justify-start md:px-6 border-b border-slate-800">
+            <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center shadow-lg shadow-cyan-900/20">
+                <i data-lucide="network" class="text-white w-5 h-5"></i>
+            </div>
+            <span class="hidden md:block ml-3 font-bold text-xl tracking-tight">AXON</span>
+        </div>
+
+        <nav class="flex-1 py-6 space-y-2 px-3" id="main-nav">
+            <button onclick="switchTab('network')" class="nav-btn active w-full flex items-center gap-3 px-3 py-2 rounded-md transition-all bg-cyan-950/30 text-cyan-400 border border-cyan-900/50" data-target="network">
+                <i data-lucide="network" class="w-5 h-5"></i>
+                <span class="hidden md:block font-medium text-sm">Topology</span>
+            </button>
+            <button onclick="switchTab('chat')" class="nav-btn w-full flex items-center gap-3 px-3 py-2 rounded-md transition-all text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent" data-target="chat">
+                <i data-lucide="message-square" class="w-5 h-5"></i>
+                <span class="hidden md:block font-medium text-sm">Comms</span>
+            </button>
+            <button onclick="switchTab('store')" class="nav-btn w-full flex items-center gap-3 px-3 py-2 rounded-md transition-all text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent" data-target="store">
+                <i data-lucide="database" class="w-5 h-5"></i>
+                <span class="hidden md:block font-medium text-sm">Store & Fwd</span>
+            </button>
+            <button onclick="switchTab('identity')" class="nav-btn w-full flex items-center gap-3 px-3 py-2 rounded-md transition-all text-slate-400 hover:text-slate-200 hover:bg-slate-900 border border-transparent" data-target="identity">
+                <i data-lucide="shield" class="w-5 h-5"></i>
+                <span class="hidden md:block font-medium text-sm">Identity</span>
+            </button>
+        </nav>
+
+        <div class="p-4 border-t border-slate-800">
+            <div class="flex items-center gap-3">
+                <div class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
+                <span class="hidden md:block text-xs font-mono text-slate-400 truncate w-full">
+                    Tor Proxy: 9050
+                </span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="flex-1 flex flex-col min-w-0">
+
+        <!-- Header -->
+        <header class="h-16 border-b border-slate-800 bg-slate-950/50 backdrop-blur flex items-center justify-between px-6">
+            <div>
+                <h2 id="header-title" class="text-lg font-medium text-slate-100">Network Topology</h2>
+                <p id="header-subtitle" class="text-xs text-slate-500 font-mono flex items-center gap-2">
+                    Running v0.9.4-alpha // Mesh Active
+                </p>
+            </div>
+
+            <div class="flex items-center gap-4">
+                <button class="p-2 text-slate-400 hover:text-cyan-400 transition-colors">
+                    <i data-lucide="user-plus" class="w-5 h-5"></i>
+                </button>
+                <button class="p-2 text-slate-400 hover:text-cyan-400 transition-colors">
+                    <i data-lucide="settings" class="w-5 h-5"></i>
+                </button>
+            </div>
+        </header>
+
+        <!-- Viewport -->
+        <main class="flex-1 relative overflow-hidden bg-slate-950">
+
+            <!-- VIEW: NETWORK -->
+            <div id="view-network" class="view-section h-full flex flex-col">
+                <!-- Graph Visualizer -->
+                <div class="flex-1 relative bg-slate-900 flex items-center justify-center overflow-hidden">
+                    <div class="absolute inset-0 opacity-10" style="background-image: radial-gradient(circle, #334155 1px, transparent 1px); background-size: 30px 30px;"></div>
+
+                    <svg class="w-full h-full max-w-4xl max-h-[500px] pointer-events-none select-none">
+                        <!-- Connections -->
+                        <line x1="50%" y1="50%" x2="30%" y2="30%" stroke="#06b6d4" stroke-width="2" stroke-opacity="0.6">
+                            <animate attributeName="stroke-opacity" values="0.6;0.2;0.6" dur="3s" repeatCount="indefinite" />
+                        </line>
+                        <line x1="50%" y1="50%" x2="70%" y2="40%" stroke="#64748b" stroke-width="1" stroke-dasharray="5,5" />
+                        <line x1="30%" y1="30%" x2="30%" y2="70%" stroke="#06b6d4" stroke-width="1" stroke-opacity="0.4" />
+
+                        <!-- Nodes -->
+                        <!-- You -->
+                        <g transform="translate(400, 250)" id="node-you"> <!-- Center-ish, adjusted dynamically via CSS usually but fixed for mock -->
+                           <!-- Using foreignObject or just circles for nodes -->
+                           <circle cx="50%" cy="50%" r="25" fill="#0f172a" stroke="#06b6d4" stroke-width="3" />
+                           <circle cx="50%" cy="50%" r="35" fill="none" stroke="#06b6d4" stroke-width="1" opacity="0.5">
+                                <animate attributeName="r" values="25;35" dur="1.5s" repeatCount="indefinite" />
+                                <animate attributeName="opacity" values="0.5;0" dur="1.5s" repeatCount="indefinite" />
+                           </circle>
+                           <text x="50%" y="85" fill="#94a3b8" font-size="12" text-anchor="middle" font-family="monospace">You</text>
+                        </g>
+                    </svg>
+
+                    <!-- Overlay Nodes (Absolute positioning for easier centering in this simple mock) -->
+                    <div class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 flex items-center justify-center">
+                        <div class="w-12 h-12 rounded-full bg-slate-900 border-2 border-cyan-500 z-10"></div>
+                        <div class="absolute text-slate-400 text-xs font-mono -bottom-6">You</div>
+                    </div>
+
+                    <!-- Peer 1 -->
+                    <div class="absolute top-1/3 left-1/3 transform -translate-x-1/2 -translate-y-1/2 flex items-center justify-center">
+                        <div class="w-10 h-10 rounded-full bg-slate-900 border-2 border-emerald-500 z-10"></div>
+                        <div class="absolute text-slate-400 text-xs font-mono -bottom-6">Sarah_V</div>
+                    </div>
+
+                    <!-- Peer 2 -->
+                    <div class="absolute bottom-1/3 left-1/3 transform -translate-x-1/2 -translate-y-1/2 flex items-center justify-center">
+                        <div class="w-9 h-9 rounded-full bg-slate-900 border-2 border-amber-500 z-10"></div>
+                        <div class="absolute text-slate-400 text-xs font-mono -bottom-6">Null_P</div>
+                    </div>
+
+                    <!-- Peer 3 -->
+                    <div class="absolute top-1/3 right-1/3 transform -translate-x-1/2 -translate-y-1/2 flex items-center justify-center">
+                        <div class="w-9 h-9 rounded-full bg-slate-900 border-2 border-slate-600 z-10"></div>
+                        <div class="absolute text-slate-400 text-xs font-mono -bottom-6">Drifter</div>
+                    </div>
+
+                    <!-- HUD -->
+                    <div class="absolute top-4 right-4 bg-slate-800/80 backdrop-blur p-3 rounded-lg border border-slate-700 text-xs font-mono text-slate-300 shadow-xl">
+                        <div class="flex items-center gap-2 mb-2">
+                            <i data-lucide="activity" class="w-3 h-3 text-cyan-400"></i>
+                            <span>Topology Status</span>
+                        </div>
+                        <div class="grid grid-cols-2 gap-x-6 gap-y-1">
+                            <span class="text-slate-500">Nodes</span> <span>14 (4 Active)</span>
+                            <span class="text-slate-500">Routes</span> <span>Mesh</span>
+                            <span class="text-slate-500">Traffic</span> <span>24kb/s</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Peer Table -->
+                <div class="h-1/3 border-t border-slate-800 bg-slate-900/50 p-4 overflow-auto">
+                    <h3 class="text-xs font-bold text-slate-500 uppercase mb-3 px-2">Known Peers (DHT Cache)</h3>
+                    <div class="w-full text-left">
+                        <div class="grid grid-cols-12 gap-4 text-xs font-mono text-slate-500 border-b border-slate-800 pb-2 px-2">
+                            <div class="col-span-3">ALIAS</div>
+                            <div class="col-span-4">ONION ADDR</div>
+                            <div class="col-span-2">TRUST TYPE</div>
+                            <div class="col-span-1">HOPS</div>
+                            <div class="col-span-2 text-right">STATUS</div>
+                        </div>
+
+                        <!-- Row 1 -->
+                        <div class="grid grid-cols-12 gap-4 text-sm py-3 px-2 border-b border-slate-800/50 hover:bg-slate-800/50 cursor-pointer transition-colors group">
+                            <div class="col-span-3 font-medium text-slate-200 group-hover:text-cyan-400">Sarah_Vanguard</div>
+                            <div class="col-span-4 font-mono text-slate-500 truncate">vngrd...a2s1.onion</div>
+                            <div class="col-span-2 flex items-center gap-1 text-slate-400">
+                                <i data-lucide="shield" class="w-3 h-3 text-emerald-500"></i> Direct
+                            </div>
+                            <div class="col-span-1 text-slate-500">0</div>
+                            <div class="col-span-2 text-right">
+                                <span class="text-[10px] px-2 py-0.5 rounded border border-emerald-500/30 bg-emerald-500/20 text-emerald-400 uppercase tracking-wider font-bold">ONLINE</span>
+                            </div>
+                        </div>
+
+                        <!-- Row 2 -->
+                        <div class="grid grid-cols-12 gap-4 text-sm py-3 px-2 border-b border-slate-800/50 hover:bg-slate-800/50 cursor-pointer transition-colors group">
+                            <div class="col-span-3 font-medium text-slate-200 group-hover:text-cyan-400">Null_Pointer</div>
+                            <div class="col-span-4 font-mono text-slate-500 truncate">null...b9x2.onion</div>
+                            <div class="col-span-2 flex items-center gap-1 text-slate-400">
+                                <i data-lucide="share-2" class="w-3 h-3 text-amber-500"></i> Transitive
+                            </div>
+                            <div class="col-span-1 text-slate-500">1</div>
+                            <div class="col-span-2 text-right">
+                                <span class="text-[10px] px-2 py-0.5 rounded border border-emerald-500/30 bg-emerald-500/20 text-emerald-400 uppercase tracking-wider font-bold">ONLINE</span>
+                            </div>
+                        </div>
+
+                        <!-- Row 3 -->
+                        <div class="grid grid-cols-12 gap-4 text-sm py-3 px-2 border-b border-slate-800/50 hover:bg-slate-800/50 cursor-pointer transition-colors group">
+                            <div class="col-span-3 font-medium text-slate-200 group-hover:text-cyan-400">Crypto_Drifter</div>
+                            <div class="col-span-4 font-mono text-slate-500 truncate">drift...k8l2.onion</div>
+                            <div class="col-span-2 flex items-center gap-1 text-slate-400">
+                                <i data-lucide="shield" class="w-3 h-3 text-emerald-500"></i> Direct
+                            </div>
+                            <div class="col-span-1 text-slate-500">0</div>
+                            <div class="col-span-2 text-right">
+                                <span class="text-[10px] px-2 py-0.5 rounded border border-slate-600 bg-slate-700/50 text-slate-400 uppercase tracking-wider font-bold">OFFLINE</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- VIEW: CHAT -->
+            <div id="view-chat" class="view-section hidden h-full flex">
+                <!-- Chat Sidebar -->
+                <div class="w-64 border-r border-slate-800 bg-slate-900/30 hidden md:flex flex-col">
+                    <div class="p-3">
+                        <input type="text" placeholder="Filter peers..." class="w-full bg-slate-800 border-none rounded text-sm p-2 text-slate-200 placeholder-slate-500 focus:ring-1 focus:ring-cyan-500 outline-none">
+                    </div>
+                    <div class="flex-1 overflow-y-auto">
+                        <!-- Active Peer -->
+                        <div class="p-3 cursor-pointer border-l-2 border-cyan-500 bg-slate-800/50 transition-all">
+                            <div class="flex justify-between items-start mb-1">
+                                <span class="font-medium text-sm">Sarah_Vanguard</span>
+                                <div class="w-1.5 h-1.5 rounded-full bg-emerald-500 mt-1.5"></div>
+                            </div>
+                            <div class="text-xs text-slate-500 font-mono truncate">vngrd...a2s1.onion</div>
+                        </div>
+                        <!-- Inactive Peer -->
+                        <div class="p-3 cursor-pointer border-l-2 border-transparent hover:bg-slate-800/30 transition-all">
+                            <div class="flex justify-between items-start mb-1">
+                                <span class="font-medium text-sm">Null_Pointer</span>
+                                <div class="w-1.5 h-1.5 rounded-full bg-emerald-500 mt-1.5"></div>
+                            </div>
+                            <div class="text-xs text-slate-500 font-mono truncate">null...b9x2.onion</div>
+                        </div>
+                        <!-- Offline Peer -->
+                        <div class="p-3 cursor-pointer border-l-2 border-transparent hover:bg-slate-800/30 transition-all">
+                            <div class="flex justify-between items-start mb-1">
+                                <span class="font-medium text-sm">Crypto_Drifter</span>
+                                <div class="w-1.5 h-1.5 rounded-full bg-slate-600 mt-1.5"></div>
+                            </div>
+                            <div class="text-xs text-slate-500 font-mono truncate">drift...k8l2.onion</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Message Area -->
+                <div class="flex-1 flex flex-col bg-slate-950">
+                    <div id="chat-history" class="flex-1 overflow-y-auto p-4 space-y-4">
+                        <div class="flex justify-center my-4">
+                            <span class="text-[10px] font-mono bg-slate-900 text-slate-500 px-3 py-1 rounded-full border border-slate-800">
+                                Handshake Verified • Forward Secrecy Enabled
+                            </span>
+                        </div>
+
+                        <!-- Incoming Msg -->
+                        <div class="flex flex-col items-start">
+                            <div class="max-w-[70%] p-3 rounded-lg text-sm bg-slate-800 border border-slate-700 text-slate-200 rounded-tl-none">
+                                Did you get the packet from Null?
+                            </div>
+                            <div class="flex items-center gap-2 mt-1 px-1">
+                                <span class="text-[10px] text-slate-600 font-mono">10:42</span>
+                            </div>
+                        </div>
+
+                        <!-- Outgoing Msg -->
+                        <div class="flex flex-col items-end">
+                            <div class="max-w-[70%] p-3 rounded-lg text-sm bg-cyan-900/20 border border-cyan-800/50 text-cyan-100 rounded-tr-none">
+                                Verifying signature now.
+                            </div>
+                            <div class="flex items-center gap-2 mt-1 px-1">
+                                <span class="text-[10px] text-slate-600 font-mono">10:43</span>
+                                <span class="text-emerald-500 text-[10px]">ACK</span>
+                            </div>
+                        </div>
+
+                        <!-- Incoming Msg -->
+                        <div class="flex flex-col items-start">
+                            <div class="max-w-[70%] p-3 rounded-lg text-sm bg-slate-800 border border-slate-700 text-slate-200 rounded-tl-none">
+                                Null says he's routing through a new peer node.
+                            </div>
+                            <div class="flex items-center gap-2 mt-1 px-1">
+                                <span class="text-[10px] text-slate-600 font-mono">10:45</span>
+                            </div>
+                        </div>
+
+                        <!-- Outgoing Msg -->
+                        <div class="flex flex-col items-end">
+                            <div class="max-w-[70%] p-3 rounded-lg text-sm bg-cyan-900/20 border border-cyan-800/50 text-cyan-100 rounded-tr-none">
+                                Confirmed. The graph updated automatically.
+                            </div>
+                            <div class="flex items-center gap-2 mt-1 px-1">
+                                <span class="text-[10px] text-slate-600 font-mono">10:46</span>
+                                <span class="text-emerald-500 text-[10px]">ACK</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="p-4 border-t border-slate-800 bg-slate-900/20">
+                        <form id="chat-form" class="flex gap-2">
+                            <input
+                                id="chat-input"
+                                type="text"
+                                placeholder="Message Sarah_Vanguard..."
+                                class="flex-1 bg-slate-800 border-none rounded-md px-4 py-3 text-sm text-slate-200 focus:ring-1 focus:ring-cyan-500 outline-none"
+                            >
+                            <button type="submit" class="bg-cyan-600 hover:bg-cyan-500 text-white p-3 rounded-md transition-colors">
+                                <i data-lucide="send" class="w-5 h-5"></i>
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+
+            <!-- VIEW: STORE & FORWARD -->
+            <div id="view-store" class="view-section hidden p-6 max-w-4xl mx-auto">
+                <div class="flex items-center gap-4 mb-8">
+                    <div class="p-3 bg-amber-500/10 rounded-lg border border-amber-500/20 text-amber-500">
+                        <i data-lucide="database" class="w-6 h-6"></i>
+                    </div>
+                    <div>
+                        <h2 class="text-xl font-bold text-white">Store & Forward Queue</h2>
+                        <p class="text-slate-400 text-sm">Encrypted packets waiting for offline peers.</p>
+                    </div>
+                </div>
+
+                <div class="bg-slate-900 border border-slate-800 rounded-lg overflow-hidden">
+                    <div class="grid grid-cols-6 bg-slate-950 p-3 text-xs font-mono text-slate-500 uppercase border-b border-slate-800">
+                        <div class="col-span-2">Recipient</div>
+                        <div class="col-span-1">Packets</div>
+                        <div class="col-span-1">Size</div>
+                        <div class="col-span-1">Age</div>
+                        <div class="col-span-1 text-right">Action</div>
+                    </div>
+
+                    <div class="p-3 border-b border-slate-800/50 flex items-center text-sm hover:bg-slate-800/20">
+                        <div class="col-span-2 w-1/3 font-mono text-amber-400">Crypto_Drifter</div>
+                        <div class="col-span-1 w-1/6 text-slate-300">3 msgs</div>
+                        <div class="col-span-1 w-1/6 text-slate-300">12kb</div>
+                        <div class="col-span-1 w-1/6 text-slate-400">4h 12m</div>
+                        <div class="col-span-1 w-1/6 text-right text-xs text-cyan-500 animate-pulse">Waiting...</div>
+                    </div>
+
+                    <div class="p-3 border-b border-slate-800/50 flex items-center text-sm hover:bg-slate-800/20">
+                        <div class="col-span-2 w-1/3 font-mono text-slate-500">f8a2...91x0</div>
+                        <div class="col-span-1 w-1/6 text-slate-300">1 msg</div>
+                        <div class="col-span-1 w-1/6 text-slate-300">4kb</div>
+                        <div class="col-span-1 w-1/6 text-slate-400">12m</div>
+                        <div class="col-span-1 w-1/6 text-right text-xs text-cyan-500 animate-pulse">Waiting...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- VIEW: IDENTITY -->
+            <div id="view-identity" class="view-section hidden max-w-3xl mx-auto p-8">
+                <div class="bg-slate-900/50 border border-slate-800 rounded-xl p-6 mb-6">
+                    <div class="flex items-start justify-between mb-6">
+                        <div>
+                            <h3 class="text-xl font-medium text-white mb-1">Peer Identity</h3>
+                            <p class="text-slate-500 text-sm">This is how you appear on the mesh.</p>
+                        </div>
+                        <div class="w-24 h-24 bg-white p-1 rounded-lg">
+                            <div class="w-full h-full bg-slate-900 pattern-dots"></div>
+                        </div>
+                    </div>
+
+                    <div class="space-y-4">
+                        <div class="bg-black/30 p-4 rounded-lg border border-slate-800 font-mono text-sm group relative">
+                            <label class="text-[10px] text-slate-500 uppercase tracking-widest block mb-1">Onion Address</label>
+                            <div class="text-cyan-400 break-all">axon2x...9s8j.onion</div>
+                            <button class="absolute right-3 top-3 text-slate-600 hover:text-white" onclick="logAction('Copied Address')"><i data-lucide="copy" class="w-4 h-4"></i></button>
+                        </div>
+
+                        <div class="bg-black/30 p-4 rounded-lg border border-slate-800 font-mono text-sm">
+                            <label class="text-[10px] text-slate-500 uppercase tracking-widest block mb-1">Public Key Fingerprint (Ed25519)</label>
+                            <div class="text-slate-300 break-all">ED25519-7A8B-4C9D-1E2F-3A4B-5C6D-7E8F-9A0B</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="p-4 border border-slate-800 rounded-lg bg-slate-900/30">
+                        <h4 class="font-medium text-slate-200 mb-2 flex items-center gap-2">
+                            <i data-lucide="shield" class="w-4 h-4 text-emerald-500"></i> Trust Policy
+                        </h4>
+                        <p class="text-sm text-slate-500 mb-4">Current config: Explicit Trust Only. You must verify peers manually.</p>
+                        <div class="flex items-center gap-2 cursor-pointer" onclick="toggleTrust(this)">
+                            <div class="h-4 w-8 bg-slate-700 rounded-full relative">
+                                <div class="absolute left-0 top-0 h-4 w-4 bg-slate-400 rounded-full shadow-sm transition-all" id="toggle-knob"></div>
+                            </div>
+                            <span class="text-xs text-slate-400 select-none">Allow Transitive Trust</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </main>
+
+        <!-- Console / Footer -->
+        <div class="h-32 bg-black border-t border-slate-800 p-2 font-mono text-xs overflow-y-auto" id="console-log">
+            <div class="flex items-center gap-2 text-slate-500 mb-1 sticky top-0 bg-black w-full pb-1 border-b border-slate-900">
+                <i data-lucide="terminal" class="w-3 h-3"></i>
+                <span>AXON DAEMON LOG</span>
+            </div>
+            <!-- Log entries injected by JS -->
+        </div>
+
+    </div>
+
+    <script>
+        // Initialize Lucide Icons
+        lucide.createIcons();
+
+        // --- Mock Data & State ---
+        const initialLogs = [
+            "[SYS] Tor circuit established.",
+            "[NET] Handshake: vngrd...a2s1.onion (Success)",
+            "[DHT] Received peer table update from Sarah_Vanguard.",
+            "[TRUST] Added Null_Pointer (Transitive Trust).",
+            "[MSG] Encrypting packet for Crypto_Drifter...",
+            "[STORE] Peer offline. Message stored locally (TTL 24h)."
+        ];
+
+        // --- UI Logic ---
+
+        function switchTab(tabId) {
+            // Update Navigation
+            document.querySelectorAll('.nav-btn').forEach(btn => {
+                if(btn.dataset.target === tabId) {
+                    btn.classList.add('bg-cyan-950/30', 'text-cyan-400', 'border-cyan-900/50');
+                    btn.classList.remove('text-slate-400', 'hover:text-slate-200', 'hover:bg-slate-900', 'border-transparent');
+                } else {
+                    btn.classList.remove('bg-cyan-950/30', 'text-cyan-400', 'border-cyan-900/50');
+                    btn.classList.add('text-slate-400', 'hover:text-slate-200', 'hover:bg-slate-900', 'border-transparent');
+                }
+            });
+
+            // Update Views
+            document.querySelectorAll('.view-section').forEach(view => {
+                if(view.id === `view-${tabId}`) {
+                    view.classList.remove('hidden');
+                } else {
+                    view.classList.add('hidden');
+                }
+            });
+
+            // Update Header
+            const titleMap = {
+                'network': 'Network Topology',
+                'chat': 'Secure Channel',
+                'store': 'Store & Forward Queue',
+                'identity': 'Node Identity'
+            };
+
+            const subtitleMap = {
+                'chat': '<i data-lucide="lock" class="w-3 h-3"></i> E2EE :: vngrd...a2s1.onion',
+                'default': 'Running v0.9.4-alpha // Mesh Active'
+            }
+
+            document.getElementById('header-title').innerText = titleMap[tabId];
+
+            const subtitleEl = document.getElementById('header-subtitle');
+            if(tabId === 'chat') {
+                subtitleEl.innerHTML = subtitleMap['chat'];
+            } else {
+                subtitleEl.innerHTML = subtitleMap['default'];
+            }
+            lucide.createIcons(); // Re-render icons for header changes
+        }
+
+        // --- Console Logic ---
+        const consoleContainer = document.getElementById('console-log');
+
+        function addLog(text, isError = false) {
+            const row = document.createElement('div');
+            row.className = "mb-0.5";
+            const time = new Date().toLocaleTimeString();
+            const colorClass = isError ? "text-red-500" : "text-cyan-700";
+
+            row.innerHTML = `<span class="text-slate-600">${time}</span> <span class="${colorClass} ml-2">${text}</span>`;
+            consoleContainer.appendChild(row);
+            consoleContainer.scrollTop = consoleContainer.scrollHeight;
+        }
+
+        // Initialize Logs
+        initialLogs.forEach(log => addLog(log));
+
+        function logAction(action) {
+            addLog(`[UI] ${action}`);
+        }
+
+        // --- Chat Logic ---
+        document.getElementById('chat-form').addEventListener('submit', (e) => {
+            e.preventDefault();
+            const input = document.getElementById('chat-input');
+            const text = input.value.trim();
+            if(!text) return;
+
+            // Add Message to UI
+            const chatHistory = document.getElementById('chat-history');
+
+            const msgHtml = `
+            <div class="flex flex-col items-end animate-in fade-in slide-in-from-bottom-2 duration-300">
+                <div class="max-w-[70%] p-3 rounded-lg text-sm bg-cyan-900/20 border border-cyan-800/50 text-cyan-100 rounded-tr-none">
+                    ${text}
+                </div>
+                <div class="flex items-center gap-2 mt-1 px-1">
+                    <span class="text-[10px] text-slate-600 font-mono">Now</span>
+                    <span class="text-emerald-500 text-[10px]">PENDING</span>
+                </div>
+            </div>`;
+
+            chatHistory.insertAdjacentHTML('beforeend', msgHtml);
+            chatHistory.scrollTop = chatHistory.scrollHeight;
+
+            addLog(`[MSG] Sending encrypted packet to Sarah_Vanguard...`);
+
+            // Clear input
+            input.value = '';
+
+            // Simulate ACK
+            setTimeout(() => {
+                addLog(`[NET] Packet delivered. ACK received.`);
+                // Note: updating the specific message status is skipped for this simple HTML mock
+            }, 1500);
+        });
+
+        // --- Toggle Logic ---
+        function toggleTrust(el) {
+            const knob = el.querySelector('#toggle-knob');
+            const isChecked = knob.style.left === '16px';
+
+            if(isChecked) {
+                knob.style.left = '0px';
+                knob.classList.remove('bg-emerald-400');
+                knob.classList.add('bg-slate-400');
+                addLog("[CONFIG] Transitive trust DISABLED.");
+            } else {
+                knob.style.left = '16px';
+                knob.classList.remove('bg-slate-400');
+                knob.classList.add('bg-emerald-400');
+                addLog("[CONFIG] Transitive trust ENABLED.");
+            }
+        }
+    </script>
+</body>
+</html>
