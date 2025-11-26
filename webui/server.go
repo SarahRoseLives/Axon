@@ -16,6 +16,7 @@ import (
 type UIContext struct {
 	AppVersion string
 	OnionAddr  string
+	MyOnionAddr string // NEW: for use in the Feed view
 	Status     string
 	Peers      []discovery.Peer
 	Nickname   string
@@ -43,13 +44,16 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		status := "Initializing..."
 		onion := "Loading..."
+		myOnion := ""
 		if torCtrl.Ready && torCtrl.Onion != nil {
 			status = "Online"
 			onion = torCtrl.Onion.ID + ".onion"
+			myOnion = torCtrl.Onion.ID + ".onion"
 		}
 		data := UIContext{
 			AppVersion: "0.9.14 (Trust Trails)",
 			OnionAddr:  onion,
+			MyOnionAddr: myOnion, // NEW
 			Status:     status,
 			Peers:      pm.GetPeers(),
 			Nickname:   profileMgr.GetNickname(),
@@ -205,6 +209,43 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 			Status:    "received",
 		}
 		chatMgr.SaveMessage(from, msg)
+		w.Write([]byte(`{"status":"received"}`))
+	})
+
+	// NEW: Feed Handlers
+	http.HandleFunc("/api/feed/history", func(w http.ResponseWriter, r *http.Request) {
+		msgs := chatMgr.GetFeedHistory()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(msgs)
+	})
+
+	http.HandleFunc("/api/feed/send", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost { return }
+		var req struct { Content string `json:"content"` }
+		json.NewDecoder(r.Body).Decode(&req)
+		if req.Content == "" { return }
+
+		go AttemptSendFeedMessage(torCtrl, pm, chatMgr, req.Content, profileMgr.GetNickname())
+		w.Write([]byte(`{"status":"broadcasted"}`))
+	})
+
+	http.HandleFunc("/api/feed/recv", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost { return }
+		var wireMsg chat.WireFeedMessage
+		if err := json.NewDecoder(r.Body).Decode(&wireMsg); err != nil { return }
+		from := Sanitize(wireMsg.From)
+		if pm.IsBlocked(from) { return }
+
+		// This is a public message, so no decryption is needed
+		msgID := fmt.Sprintf("%d-%s", time.Now().UnixNano(), wireMsg.Nonce)
+		msg := chat.Message{
+			ID:        msgID,
+			From:      from,
+			To:        "MESH",
+			Content:   wireMsg.Content,
+			Timestamp: time.Now(),
+		}
+		chatMgr.SaveFeedMessage(msg)
 		w.Write([]byte(`{"status":"received"}`))
 	})
 

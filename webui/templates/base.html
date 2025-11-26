@@ -2,374 +2,477 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AXON // Mesh Network</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://unpkg.com/lucide@latest"></script>
-    <style>
-        ::-webkit-scrollbar { width: 6px; height: 6px; }
-        ::-webkit-scrollbar-track { background: #0f172a; }
-        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
-        ::-webkit-scrollbar-thumb:hover { background: #06b6d4; }
-        .pattern-dots { background-image: radial-gradient(#334155 1px, transparent 1px); background-size: 8px 8px; }
-        @keyframes gentle-pulse {
-            0%, 100% { transform: scale(1); opacity: 0.5; }
-            50% { transform: scale(1.1); opacity: 0.2; }
-        }
-        .node-pulse { animation: gentle-pulse 3s infinite; }
-    </style>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>AXON // Mesh Network</title>
+	<script src="https://cdn.tailwindcss.com"></script>
+	<script src="https://unpkg.com/lucide@latest"></script>
+	<style>
+		::-webkit-scrollbar { width: 6px; height: 6px; }
+		::-webkit-scrollbar-track { background: #0f172a; }
+		::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+		::-webkit-scrollbar-thumb:hover { background: #06b6d4; }
+		.pattern-dots { background-image: radial-gradient(#334155 1px, transparent 1px); background-size: 8px 8px; }
+		@keyframes gentle-pulse {
+			0%, 100% { transform: scale(1); opacity: 0.5; }
+			50% { transform: scale(1.1); opacity: 0.2; }
+		}
+		.node-pulse { animation: gentle-pulse 3s infinite; }
+	</style>
 </head>
 <body class="bg-slate-950 text-slate-200 font-sans selection:bg-cyan-900 selection:text-cyan-100 overflow-hidden h-screen w-full flex">
 
-    {{ template "content" . }}
+	{{ template "content" . }}
 
-    <script>
-        lucide.createIcons();
-        let activePeer = null;
-        let globalPeerData = [];
+<script>
+	lucide.createIcons();
+	let activePeer = null;
+	let globalPeerData = [];
+	let latestFeedHTML = ''; // NEW: Cache the rendered feed
 
-        // --- MANAGEMENT ACTIONS ---
-        async function deletePeer() {
-            if(!activePeer || !confirm("Delete this peer and all chat history?")) return;
-            try {
-                await fetch('/api/peers/delete', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ onion_address: activePeer })
-                });
-                alert("Peer deleted.");
-                window.location.reload();
-            } catch(e) { alert("Error deleting."); }
-        }
+	// --- HELPER FUNCTION: Relative Time (NEW) ---
+	function timeAgo(date) {
+		const seconds = Math.floor((new Date() - new Date(date)) / 1000);
+		let interval = Math.floor(seconds / 31536000);
 
-        async function toggleBlockPeer() {
-            if(!activePeer) return;
-            try {
-                const res = await fetch('/api/peers/block', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ onion_address: activePeer })
-                });
-                const data = await res.json();
-                alert(data.blocked ? "Peer Blocked." : "Peer Unblocked.");
-            } catch(e) { alert("Error updating block status."); }
-        }
+		if (interval > 1) return interval + "y";
+		interval = Math.floor(seconds / 2592000);
+		if (interval > 1) return interval + "mo";
+		interval = Math.floor(seconds / 86400);
+		if (interval > 1) return interval + "d";
+		interval = Math.floor(seconds / 3600);
+		if (interval > 1) return interval + "h";
+		interval = Math.floor(seconds / 60);
+		if (interval > 1) return interval + "m";
+		return Math.floor(seconds) + "s";
+	}
 
-        // --- Render Peer Table ---
-        function renderPeerList(peers) {
-            const container = document.getElementById('peer-list-container');
-            if (!container) return;
+	// --- MANAGEMENT ACTIONS ---
+	async function deletePeer() {
+		if(!activePeer || !confirm("Delete this peer and all chat history?")) return;
+		try {
+			await fetch('/api/peers/delete', {
+				method: 'POST',
+				headers: {'Content-Type': 'application/json'},
+				body: JSON.stringify({ onion_address: activePeer })
+			});
+			alert("Peer deleted.");
+			window.location.reload();
+		} catch(e) { alert("Error deleting."); }
+	}
 
-            if (peers.length === 0) {
-                container.innerHTML = `<div class="p-8 text-center text-slate-500 text-sm">No peers found. Click the <i data-lucide="user-plus" class="w-4 h-4 inline mx-1"></i> icon above to add one.</div>`;
-                lucide.createIcons();
-                return;
-            }
+	async function toggleBlockPeer() {
+		if(!activePeer) return;
+		try {
+			const res = await fetch('/api/peers/block', {
+				method: 'POST',
+				headers: {'Content-Type': 'application/json'},
+				body: JSON.stringify({ onion_address: activePeer })
+			});
+			const data = await res.json();
+			alert(data.blocked ? "Peer Blocked." : "Peer Unblocked.");
+		} catch(e) { alert("Error updating block status."); }
+	}
 
-            const html = peers.map(p => {
-                const date = new Date(p.last_seen);
-                const timeStr = date.toLocaleTimeString([], { hour12: false });
-                const displayName = p.nickname || p.onion_address;
-                const blockedClass = p.blocked ? "opacity-50 grayscale" : "";
-                const blockedText = p.blocked ? '<span class="text-red-500 text-[10px] ml-2">BLOCKED</span>' : "";
+	// --- Render Peer Table ---
+	function renderPeerList(peers) {
+		const container = document.getElementById('peer-list-container');
+		if (!container) return;
 
-                // NEW: Show who introduced them
-                const introText = p.introduced_by ? `<div class="text-[10px] text-slate-600 mt-0.5">via ${p.introduced_by.substring(0,8)}...</div>` : "";
+		if (peers.length === 0) {
+			container.innerHTML = `<div class="p-8 text-center text-slate-500 text-sm">No peers found. Click the <i data-lucide="user-plus" class="w-4 h-4 inline mx-1"></i> icon above to add one.</div>`;
+			lucide.createIcons();
+			return;
+		}
 
-                return `
-                <div class="grid grid-cols-12 gap-4 text-sm py-3 px-2 border-b border-slate-800/50 hover:bg-slate-800/50 cursor-pointer transition-colors group ${blockedClass}" onclick="openChat('${p.onion_address}', '${p.nickname}')">
-                    <div class="col-span-6 font-mono text-slate-400 truncate group-hover:text-cyan-400" title="${p.onion_address}">
-                        ${displayName} ${blockedText}
-                        ${introText}
-                    </div>
-                    <div class="col-span-3 flex items-center gap-1 text-slate-400">
-                        <i data-lucide="shield" class="w-3 h-3 text-emerald-500"></i> ${p.trust_level}
-                    </div>
-                    <div class="col-span-3 text-right text-slate-500 text-xs">
-                        ${timeStr}
-                    </div>
-                </div>`;
-            }).join('');
+		const html = peers.map(p => {
+			const date = new Date(p.last_seen);
+			const timeStr = date.toLocaleTimeString([], { hour12: false });
+			const displayName = p.nickname || p.onion_address;
+			const blockedClass = p.blocked ? "opacity-50 grayscale" : "";
+			const blockedText = p.blocked ? '<span class="text-red-500 text-[10px] ml-2">BLOCKED</span>' : "";
 
-            if (container.innerHTML.length !== html.length) {
-                container.innerHTML = html;
-                lucide.createIcons();
-            }
-        }
+			// NEW: Show who introduced them
+			const introText = p.introduced_by ? `<div class="text-[10px] text-slate-600 mt-0.5">via ${p.introduced_by.substring(0,8)}...</div>` : "";
 
-        // --- Render Chat Sidebar ---
-        function renderChatSidebar(peers, chatStatusMap) {
-            const container = document.getElementById('chat-peer-list');
-            if (!container) return;
+			return `
+			<div class="grid grid-cols-12 gap-4 text-sm py-3 px-2 border-b border-slate-800/50 hover:bg-slate-800/50 cursor-pointer transition-colors group ${blockedClass}" onclick="openChat('${p.onion_address}', '${p.nickname}')">
+				<div class="col-span-6 font-mono text-slate-400 truncate group-hover:text-cyan-400" title="${p.onion_address}">
+					${displayName} ${blockedText}
+					${introText}
+				</div>
+				<div class="col-span-3 flex items-center gap-1 text-slate-400">
+					<i data-lucide="shield" class="w-3 h-3 text-emerald-500"></i> ${p.trust_level}
+				</div>
+				<div class="col-span-3 text-right text-slate-500 text-xs">
+					${timeStr}
+				</div>
+			</div>`;
+		}).join('');
 
-            peers.sort((a, b) => {
-                const statA = chatStatusMap[a.onion_address] || {};
-                const statB = chatStatusMap[b.onion_address] || {};
-                if (statA.unread !== statB.unread) return statA.unread ? -1 : 1;
-                if (statA.last_active && statB.last_active) {
-                    return new Date(statB.last_active) - new Date(statA.last_active);
-                }
-                return 0;
-            });
+		if (container.innerHTML.length !== html.length) {
+			container.innerHTML = html;
+			lucide.createIcons();
+		}
+	}
 
-            const html = peers.map(p => {
-                const status = chatStatusMap[p.onion_address] || {};
-                const isActive = activePeer === p.onion_address;
-                const activeClass = isActive ? 'bg-slate-800 border-l-2 border-cyan-500' : 'border-l-2 border-transparent hover:bg-slate-800/50';
+	// --- Render Chat Sidebar ---
+	function renderChatSidebar(peers, chatStatusMap) {
+		const container = document.getElementById('chat-peer-list');
+		if (!container) return;
 
-                let badge = '';
-                if (status.unread && !isActive) {
-                    badge = `<div class="w-2 h-2 rounded-full bg-red-500 shadow-md shadow-red-500/50"></div>`;
-                }
+		peers.sort((a, b) => {
+			const statA = chatStatusMap[a.onion_address] || {};
+			const statB = chatStatusMap[b.onion_address] || {};
+			if (statA.unread !== statB.unread) return statA.unread ? -1 : 1;
+			if (statA.last_active && statB.last_active) {
+				return new Date(statB.last_active) - new Date(statA.last_active);
+			}
+			return 0;
+		});
 
-                const snippet = status.snippet || "No messages yet";
-                const snippetClass = status.unread ? 'text-slate-200 font-medium' : 'text-slate-500';
-                const displayName = p.nickname || p.onion_address;
-                const blockedIcon = p.blocked ? '<i data-lucide="ban" class="w-3 h-3 text-amber-500 ml-1"></i>' : '';
+		const html = peers.map(p => {
+			const status = chatStatusMap[p.onion_address] || {};
+			const isActive = activePeer === p.onion_address;
+			const activeClass = isActive ? 'bg-slate-800 border-l-2 border-cyan-500' : 'border-l-2 border-transparent hover:bg-slate-800/50';
 
-                return `
-                <div onclick="openChat('${p.onion_address}', '${p.nickname}')" class="p-3 cursor-pointer transition-all ${activeClass} border-b border-slate-800/50">
-                    <div class="flex justify-between items-start mb-1">
-                        <span class="font-medium text-sm text-slate-200 truncate w-32 flex items-center" title="${p.onion_address}">
-                            ${displayName} ${blockedIcon}
-                        </span>
-                        ${badge}
-                    </div>
-                    <div class="text-[10px] ${snippetClass} font-mono truncate">${snippet}</div>
-                </div>`;
-            }).join('');
+			let badge = '';
+			if (status.unread && !isActive) {
+				badge = `<div class="w-2 h-2 rounded-full bg-red-500 shadow-md shadow-red-500/50"></div>`;
+			}
 
-            if (container.innerHTML.length !== html.length && html.length > 0) {
-                container.innerHTML = html;
-                lucide.createIcons();
-            } else if (peers.length === 0) {
-                 container.innerHTML = '<div class="p-4 text-xs text-slate-600 text-center italic">No peers found.</div>';
-            }
-        }
+			const snippet = status.snippet || "No messages yet";
+			const snippetClass = status.unread ? 'text-slate-200 font-medium' : 'text-slate-500';
+			const displayName = p.nickname || p.onion_address;
+			const blockedIcon = p.blocked ? '<i data-lucide="ban" class="w-3 h-3 text-amber-500 ml-1"></i>' : '';
 
-        // --- Render Topology Map (UPDATED) ---
-        function renderTopology(peers, selfAddress) {
-            const nodesContainer = document.getElementById('topology-nodes');
-            const svg = document.getElementById('topology-svg');
-            const container = document.getElementById('topology-container');
-            if (!nodesContainer || !container || !svg) return;
+			return `
+			<div onclick="openChat('${p.onion_address}', '${p.nickname}')" class="p-3 cursor-pointer transition-all ${activeClass} border-b border-slate-800/50">
+				<div class="flex justify-between items-start mb-1">
+					<span class="font-medium text-sm text-slate-200 truncate w-32 flex items-center" title="${p.onion_address}">
+						${displayName} ${blockedIcon}
+					</span>
+					${badge}
+				</div>
+				<div class="text-[10px] ${snippetClass} font-mono truncate">${snippet}</div>
+			</div>`;
+		}).join('');
 
-            const w = container.clientWidth; const h = container.clientHeight;
-            const cx = w / 2; const cy = h / 2; const radius = Math.min(w, h) / 3.5;
+		if (container.innerHTML.length !== html.length && html.length > 0) {
+			container.innerHTML = html;
+			lucide.createIcons();
+		} else if (peers.length === 0) {
+				container.innerHTML = '<div class="p-4 text-xs text-slate-600 text-center italic">No peers found.</div>';
+		}
+	}
 
-            // 1. Map Coordinates so we can look them up
-            const coords = {};
+	// --- Render Topology Map (UPDATED) ---
+	function renderTopology(peers, selfAddress) {
+		const nodesContainer = document.getElementById('topology-nodes');
+		const svg = document.getElementById('topology-svg');
+		const container = document.getElementById('topology-container');
+		if (!nodesContainer || !container || !svg) return;
 
-            if (peers.length > 0) {
-                const angleStep = (2 * Math.PI) / peers.length;
-                peers.forEach((peer, index) => {
-                    const angle = index * angleStep;
-                    coords[peer.onion_address] = {
-                        x: cx + radius * Math.cos(angle),
-                        y: cy + radius * Math.sin(angle),
-                        data: peer
-                    };
-                });
-            }
+		const w = container.clientWidth; const h = container.clientHeight;
+		const cx = w / 2; const cy = h / 2; const radius = Math.min(w, h) / 3.5;
 
-            // 2. Draw Self Node
-            let html = `
-                <div class="absolute transform -translate-x-1/2 -translate-y-1/2 flex flex-col items-center justify-center pointer-events-auto" style="left: ${cx}px; top: ${cy}px">
-                     <div class="w-16 h-16 rounded-full bg-slate-900 border-2 border-cyan-500 z-10 flex items-center justify-center shadow-[0_0_20px_rgba(6,182,212,0.3)]">
-                        <i data-lucide="user" class="w-6 h-6 text-cyan-500"></i>
-                     </div>
-                     <div class="absolute w-24 h-24 rounded-full border border-cyan-500/30 node-pulse z-0"></div>
-                     <div class="mt-2 text-[10px] font-mono text-cyan-400 bg-black/50 px-2 py-0.5 rounded border border-cyan-900/50">You</div>
-                </div>`;
+		// 1. Map Coordinates so we can look them up
+		const coords = {};
 
-            svg.innerHTML = '';
+		if (peers.length > 0) {
+			const angleStep = (2 * Math.PI) / peers.length;
+			peers.forEach((peer, index) => {
+				const angle = index * angleStep;
+				coords[peer.onion_address] = {
+					x: cx + radius * Math.cos(angle),
+					y: cy + radius * Math.sin(angle),
+					data: peer
+				};
+			});
+		}
 
-            // 3. Draw Peer Nodes & Lines
-            Object.values(coords).forEach(item => {
-                const px = item.x;
-                const py = item.y;
-                const p = item.data;
-                const isDirect = p.trust_level === 'direct' || p.trust_level === 'neighbor';
+		// 2. Draw Self Node
+		let html = `
+			<div class="absolute transform -translate-x-1/2 -translate-y-1/2 flex flex-col items-center justify-center pointer-events-auto" style="left: ${cx}px; top: ${cy}px">
+					<div class="w-16 h-16 rounded-full bg-slate-900 border-2 border-cyan-500 z-10 flex items-center justify-center shadow-[0_0_20px_rgba(6,182,212,0.3)]">
+						<i data-lucide="user" class="w-6 h-6 text-cyan-500"></i>
+					</div>
+					<div class="absolute w-24 h-24 rounded-full border border-cyan-500/30 node-pulse z-0"></div>
+					<div class="mt-2 text-[10px] font-mono text-cyan-400 bg-black/50 px-2 py-0.5 rounded border border-cyan-900/50">You</div>
+			</div>`;
 
-                // Determine Line Target
-                // Default: Center (You)
-                let tx = cx;
-                let ty = cy;
+		svg.innerHTML = '';
 
-                // IF they were introduced by someone who is ALSO on the map, draw line to them
-                if (p.introduced_by && coords[p.introduced_by]) {
-                    tx = coords[p.introduced_by].x;
-                    ty = coords[p.introduced_by].y;
-                }
+		// 3. Draw Peer Nodes & Lines
+		Object.values(coords).forEach(item => {
+			const px = item.x;
+			const py = item.y;
+			const p = item.data;
+			const isDirect = p.trust_level === 'direct' || p.trust_level === 'neighbor';
 
-                // Draw Line
-                const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-                line.setAttribute("x1", tx); line.setAttribute("y1", ty);
-                line.setAttribute("x2", px); line.setAttribute("y2", py);
+			// Determine Line Target
+			// Default: Center (You)
+			let tx = cx;
+			let ty = cy;
 
-                const strokeColor = p.blocked ? "#ef4444" : (isDirect ? "#10b981" : "#f59e0b");
-                line.setAttribute("stroke", strokeColor);
-                line.setAttribute("stroke-width", "1");
-                line.setAttribute("stroke-opacity", "0.3");
-                if (!isDirect && !p.introduced_by) line.setAttribute("stroke-dasharray", "4,4");
-                svg.appendChild(line);
+			// IF they were introduced by someone who is ALSO on the map, draw line to them
+			if (p.introduced_by && coords[p.introduced_by]) {
+				tx = coords[p.introduced_by].x;
+				ty = coords[p.introduced_by].y;
+			}
 
-                const borderColor = p.blocked ? 'border-red-500' : (isDirect ? 'border-emerald-500' : 'border-amber-500');
-                const textColor = p.blocked ? 'text-red-500' : (isDirect ? 'text-emerald-500' : 'text-amber-500');
-                const icon = p.blocked ? 'ban' : (isDirect ? 'shield' : 'share-2');
-                const label = p.nickname || p.onion_address.substring(0,8)+"...";
+			// Draw Line
+			const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+			line.setAttribute("x1", tx); line.setAttribute("y1", ty);
+			line.setAttribute("x2", px); line.setAttribute("y2", py);
 
-                html += `
-                <div onclick="openChat('${p.onion_address}', '${p.nickname}')" class="absolute transform -translate-x-1/2 -translate-y-1/2 flex flex-col items-center justify-center pointer-events-auto cursor-pointer hover:scale-110 transition-transform duration-200" style="left: ${px}px; top: ${py}px" title="${p.onion_address}\nIntro: ${p.introduced_by || 'Direct'}">
-                     <div class="w-12 h-12 rounded-full bg-slate-900 border-2 ${borderColor} z-10 flex items-center justify-center shadow-lg">
-                        <i data-lucide="${icon}" class="w-5 h-5 ${textColor}"></i>
-                     </div>
-                     <div class="mt-2 text-[10px] font-mono text-slate-400 bg-black/50 px-2 py-0.5 rounded border border-slate-800 whitespace-nowrap">${label}</div>
-                </div>`;
-            });
+			const strokeColor = p.blocked ? "#ef4444" : (isDirect ? "#10b981" : "#f59e0b");
+			line.setAttribute("stroke", strokeColor);
+			line.setAttribute("stroke-width", "1");
+			line.setAttribute("stroke-opacity", "0.3");
+			if (!isDirect && !p.introduced_by) line.setAttribute("stroke-dasharray", "4,4");
+			svg.appendChild(line);
 
-            nodesContainer.innerHTML = html;
-            lucide.createIcons();
-        }
+			const borderColor = p.blocked ? 'border-red-500' : (isDirect ? 'border-emerald-500' : 'border-amber-500');
+			const textColor = p.blocked ? 'text-red-500' : (isDirect ? 'text-emerald-500' : 'text-amber-500');
+			const icon = p.blocked ? 'ban' : (isDirect ? 'shield' : 'share-2');
+			const label = p.nickname || p.onion_address.substring(0,8)+"...";
 
-        // ... (Chat Actions, Global Poller, Navigation, etc. remain same as previous answer) ...
-        // Just ensure you copy the full script from the previous response for the parts below renderTopology
+			html += `
+			<div onclick="openChat('${p.onion_address}', '${p.nickname}')" class="absolute transform -translate-x-1/2 -translate-y-1/2 flex flex-col items-center justify-center pointer-events-auto cursor-pointer hover:scale-110 transition-transform duration-200" style="left: ${px}px; top: ${py}px" title="${p.onion_address}\nIntro: ${p.introduced_by || 'Direct'}">
+					<div class="w-12 h-12 rounded-full bg-slate-900 border-2 ${borderColor} z-10 flex items-center justify-center shadow-lg">
+						<i data-lucide="${icon}" class="w-5 h-5 ${textColor}"></i>
+					</div>
+					<div class="mt-2 text-[10px] font-mono text-slate-400 bg-black/50 px-2 py-0.5 rounded border border-slate-800 whitespace-nowrap">${label}</div>
+			</div>`;
+		});
 
-        // --- Chat Actions ---
-        function openChat(peerID, nickname) {
-            activePeer = peerID;
-            switchTab('chat');
-            const displayName = (nickname && nickname !== "undefined" && nickname !== "") ? nickname : peerID;
-            const headerHtml = `<div class="flex flex-col"><span class="font-bold text-slate-200">${displayName}</span>${nickname ? `<span class="text-[10px] font-mono text-slate-500">${peerID}</span>` : ''}</div>`;
-            document.getElementById('active-chat-peer').innerHTML = headerHtml;
-            document.getElementById('header-status-dot').classList.remove('bg-slate-600');
-            document.getElementById('header-status-dot').classList.add('bg-emerald-500', 'shadow-[0_0_8px_rgba(16,185,129,0.5)]');
-            const input = document.getElementById('chat-input');
-            input.disabled = false;
-            input.placeholder = `Message ${displayName}...`;
-            input.focus();
-            const btn = document.getElementById('chat-send-btn');
-            btn.disabled = false;
-            btn.classList.remove('bg-cyan-900', 'text-slate-500', 'cursor-not-allowed');
-            btn.classList.add('bg-cyan-600', 'text-white', 'hover:bg-cyan-500');
-            pollChat();
-        }
+		nodesContainer.innerHTML = html;
+		lucide.createIcons();
+	}
 
-        async function sendChat(e) {
-            e.preventDefault();
-            if(!activePeer) return;
-            const input = document.getElementById('chat-input');
-            const text = input.value.trim();
-            if(!text) return;
-            input.value = '';
-            try {
-                await fetch('/api/chat/send', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ to: activePeer, content: text })
-                });
-                pollChat();
-            } catch(err) { console.error("Send failed", err); }
-        }
+	// --- Chat Actions ---
+	function openChat(peerID, nickname) {
+		activePeer = peerID;
+		switchTab('chat');
+		const displayName = (nickname && nickname !== "undefined" && nickname !== "") ? nickname : peerID;
+		const headerHtml = `<div class="flex flex-col"><span class="font-bold text-slate-200">${displayName}</span>${nickname ? `<span class="text-[10px] font-mono text-slate-500">${peerID}</span>` : ''}</div>`;
+		document.getElementById('active-chat-peer').innerHTML = headerHtml;
+		document.getElementById('header-status-dot').classList.remove('bg-slate-600');
+		document.getElementById('header-status-dot').classList.add('bg-emerald-500', 'shadow-[0_0_8px_rgba(16,185,129,0.5)]');
+		const input = document.getElementById('chat-input');
+		input.disabled = false;
+		input.placeholder = `Message ${displayName}...`;
+		input.focus();
+		const btn = document.getElementById('chat-send-btn');
+		btn.disabled = false;
+		btn.classList.remove('bg-cyan-900', 'text-slate-500', 'cursor-not-allowed');
+		btn.classList.add('bg-cyan-600', 'text-white', 'hover:bg-cyan-500');
+		pollChat();
+	}
 
-        async function pollChat() {
-            if (!activePeer || document.getElementById('view-chat').classList.contains('hidden')) return;
-            try {
-                const res = await fetch(`/api/chat/history?peer=${activePeer}`);
-                const msgs = await res.json();
-                const container = document.getElementById('chat-messages');
-                if(!container) return;
-                if(msgs.length === 0) {
-                    container.innerHTML = `<div class="text-center mt-10 text-slate-600 text-xs">Start a conversation...</div>`;
-                    return;
-                }
-                const html = msgs.map(m => {
-                    const isMe = !m.incoming;
-                    const align = isMe ? 'items-end' : 'items-start';
-                    const bg = isMe ? 'bg-cyan-900/20 border-cyan-800/50 text-cyan-100 rounded-tr-none' : 'bg-slate-800 border-slate-700 text-slate-200 rounded-tl-none';
-                    const time = new Date(m.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-                    let statusIcon = '';
-                    if (isMe) {
-                        if (m.status === 'sent') statusIcon = '<span class="text-emerald-500 text-[10px]">✓</span>';
-                        else if (m.status === 'pending') statusIcon = '<span class="text-slate-500 text-[10px]">🕒</span>';
-                    }
-                    return `<div class="flex flex-col ${align}"><div class="max-w-[70%] p-3 rounded-lg text-sm border ${bg}">${m.content}</div><div class="flex items-center gap-2 mt-1 px-1"><span class="text-[10px] text-slate-600 font-mono">${time}</span>${statusIcon}</div></div>`;
-                }).join('');
-                if (container.innerHTML.length !== html.length) {
-                    container.innerHTML = html;
-                    container.scrollTop = container.scrollHeight;
-                }
-            } catch(e) { console.error(e); }
-        }
+	async function sendChat(e) {
+		e.preventDefault();
+		if(!activePeer) return;
+		const input = document.getElementById('chat-input');
+		const text = input.value.trim();
+		if(!text) return;
+		input.value = '';
+		try {
+			await fetch('/api/chat/send', {
+				method: 'POST',
+				headers: {'Content-Type': 'application/json'},
+				body: JSON.stringify({ to: activePeer, content: text })
+			});
+			pollChat();
+		} catch(err) { console.error("Send failed", err); }
+	}
 
-        setInterval(async () => {
-            try {
-                const resPeers = await fetch('/api/peers');
-                if (!resPeers.ok) return;
-                const dataPeers = await resPeers.json();
-                globalPeerData = dataPeers.peers || [];
-                const peers = globalPeerData;
-                const selfAddr = dataPeers.self || "";
+	async function pollChat() {
+		if (!activePeer || document.getElementById('view-chat').classList.contains('hidden')) return;
+		try {
+			const res = await fetch(`/api/chat/history?peer=${activePeer}`);
+			const msgs = await res.json();
+			const container = document.getElementById('chat-messages');
+			if(!container) return;
+			if(msgs.length === 0) {
+				container.innerHTML = `<div class="text-center mt-10 text-slate-600 text-xs">Start a conversation...</div>`;
+				return;
+			}
+			const html = msgs.map(m => {
+				const isMe = !m.incoming;
+				const align = isMe ? 'items-end' : 'items-start';
+				const bg = isMe ? 'bg-cyan-900/20 border-cyan-800/50 text-cyan-100 rounded-tr-none' : 'bg-slate-800 border-slate-700 text-slate-200 rounded-tl-none';
+				const time = new Date(m.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+				let statusIcon = '';
+				if (isMe) {
+					if (m.status === 'sent') statusIcon = '<span class="text-emerald-500 text-[10px]">✓</span>';
+					else if (m.status === 'pending') statusIcon = '<span class="text-slate-500 text-[10px]">🕒</span>';
+				}
+				return `<div class="flex flex-col ${align}"><div class="max-w-[70%] p-3 rounded-lg text-sm border ${bg}">${m.content}</div><div class="flex items-center gap-2 mt-1 px-1"><span class="text-[10px] text-slate-600 font-mono">${time}</span>${statusIcon}</div></div>`;
+			}).join('');
+			if (container.innerHTML.length !== html.length) {
+				container.innerHTML = html;
+				container.scrollTop = container.scrollHeight;
+			}
+		} catch(e) { console.error(e); }
+	}
 
-                const resStatus = await fetch('/api/chat/status');
-                let chatStatusMap = {};
-                let totalUnread = 0;
-                if (resStatus.ok) {
-                    const statusData = await resStatus.json() || [];
-                    statusData.forEach(s => {
-                        chatStatusMap[s.peer_id] = s;
-                        if(s.unread) totalUnread++;
-                    });
-                }
+	// --- Feed Actions (NEW) ---
+	async function sendFeedPost(e) {
+		e.preventDefault();
+		const input = document.getElementById('feed-input');
+		const text = input.value.trim();
+		if (!text) return;
+		input.value = '';
+		try {
+			await fetch('/api/feed/send', {
+				method: 'POST',
+				headers: {'Content-Type': 'application/json'},
+				body: JSON.stringify({ content: text })
+			});
+			// Give a brief moment for the local save to register before poll
+			setTimeout(pollFeed, 500);
+		} catch(err) { console.error("Feed post failed", err); }
+	}
 
-                const netView = document.getElementById('view-network');
-                if (netView && !netView.classList.contains('hidden')) {
-                     const hud = document.getElementById('hud-node-count');
-                     if(hud) hud.innerText = peers.length + 1;
-                     renderTopology(peers, selfAddr);
-                     renderPeerList(peers);
-                }
+	async function pollFeed() {
+		if (document.getElementById('view-feed').classList.contains('hidden')) return;
+		try {
+			const res = await fetch('/api/feed/history');
+			const msgs = await res.json();
+			const container = document.getElementById('feed-messages');
+			if(!container) return;
 
-                const chatView = document.getElementById('view-chat');
-                if (chatView && !chatView.classList.contains('hidden')) {
-                    renderChatSidebar(peers, chatStatusMap);
-                }
+			const selfOnion = document.getElementById('self-onion-address').innerText.trim();
+			const nicknameMap = {};
+			globalPeerData.forEach(p => nicknameMap[p.onion_address] = p.nickname);
+			nicknameMap[selfOnion] = "You";
 
-                const badge = document.getElementById('nav-chat-badge');
-                if(badge) {
-                    if (totalUnread > 0) badge.classList.remove('hidden');
-                    else badge.classList.add('hidden');
-                }
-                pollChat();
-            } catch(e) { console.error("Poll cycle failed", e); }
-        }, 1500);
+			if(msgs.length === 0) {
+				container.innerHTML = `<div class="text-center mt-10 text-slate-600 text-xs">Be the first to post!</div>`;
+				latestFeedHTML = container.innerHTML;
+				return;
+			}
 
-        function switchTab(tabId) {
-            document.querySelectorAll('.nav-btn').forEach(btn => {
-                const isActive = btn.dataset.target === tabId;
-                btn.classList.toggle('bg-cyan-950/30', isActive);
-                btn.classList.toggle('text-cyan-400', isActive);
-                btn.classList.toggle('border-cyan-900/50', isActive);
-                btn.classList.toggle('text-slate-400', !isActive);
-                btn.classList.toggle('border-transparent', !isActive);
-            });
-            document.querySelectorAll('.view-section').forEach(view => {
-                view.classList.toggle('hidden', view.id !== `view-${tabId}`);
-            });
-            const titles = { 'network': 'Network Topology', 'chat': 'Secure Channel', 'identity': 'Node Identity' };
-            document.getElementById('header-title').innerText = titles[tabId];
-        }
+			const html = msgs.map(m => {
+				const isMe = m.from === selfOnion;
+				const fromName = nicknameMap[m.from] || m.from.substring(0, 16) + "...";
+				const relativeTime = timeAgo(m.timestamp); // Use relative time
+				const fromClass = isMe ? 'text-cyan-400 font-semibold' : 'text-slate-200 font-medium';
+				const cardClass = isMe ? 'bg-cyan-900/10 border-cyan-800/50' : 'bg-slate-900/50 border-slate-800';
 
-        async function promptAddPeer() {
-            const onion = prompt("Enter Peer Onion Address:");
-            if (!onion) return;
-            try {
-                const res = await fetch('/api/peers/add', { method: 'POST', body: JSON.stringify({ onion_address: onion }) });
-                if (res.status === 409) alert("Peer exists.");
-            } catch (e) { alert("Error."); }
-        }
-    </script>
+				return `
+					<div class="border rounded-xl p-4 shadow-md transition-shadow hover:shadow-cyan-900/30 ${cardClass}">
+						<div class="flex justify-between items-start mb-2">
+							<span class="text-sm ${fromClass} flex items-center gap-2">
+								<i data-lucide="user" class="w-4 h-4 text-slate-500"></i>
+								${fromName}
+							</span>
+							<span class="text-xs text-slate-600 font-mono" title="${new Date(m.timestamp).toLocaleString()}">${relativeTime} ago</span>
+						</div>
+						<p class="text-base text-slate-300 whitespace-pre-wrap py-2">${m.content}</p>
+						<div class="text-[9px] text-slate-700 font-mono truncate pt-2 mt-2 border-t border-slate-900" title="${m.from}">ID: ${m.from}</div>
+					</div>`;
+			}).join('');
+
+			if (latestFeedHTML !== html) {
+				container.innerHTML = html;
+				latestFeedHTML = html;
+				lucide.createIcons(); // Re-render icons after DOM update
+			}
+		} catch(e) { console.error(e); }
+	}
+
+	setInterval(async () => {
+		try {
+			const resPeers = await fetch('/api/peers');
+			if (!resPeers.ok) return;
+			const dataPeers = await resPeers.json();
+			globalPeerData = dataPeers.peers || [];
+			const peers = globalPeerData;
+			const selfAddr = dataPeers.self || "";
+
+			const resStatus = await fetch('/api/chat/status');
+			let chatStatusMap = {};
+			let totalUnread = 0;
+			if (resStatus.ok) {
+				const statusData = await resStatus.json() || [];
+				statusData.forEach(s => {
+					chatStatusMap[s.peer_id] = s;
+					if(s.unread) totalUnread++;
+				});
+			}
+
+			const netView = document.getElementById('view-network');
+			if (netView && !netView.classList.contains('hidden')) {
+					const hud = document.getElementById('hud-node-count');
+					if(hud) hud.innerText = peers.length + 1;
+					renderTopology(peers, selfAddr);
+					renderPeerList(peers);
+			}
+
+			const chatView = document.getElementById('view-chat');
+			if (chatView && !chatView.classList.contains('hidden')) {
+				renderChatSidebar(peers, chatStatusMap);
+				pollChat();
+			}
+
+			const feedView = document.getElementById('view-feed'); // Check feed view
+			if (feedView && !feedView.classList.contains('hidden')) {
+				pollFeed();
+			}
+
+			const badge = document.getElementById('nav-chat-badge');
+			if(badge) {
+				if (totalUnread > 0) badge.classList.remove('hidden');
+				else badge.classList.add('hidden');
+			}
+		} catch(e) { console.error("Poll cycle failed", e); }
+	}, 1500);
+
+	function switchTab(tabId) {
+		document.querySelectorAll('.nav-btn').forEach(btn => {
+			const isActive = btn.dataset.target === tabId;
+			btn.classList.toggle('bg-cyan-950/30', isActive);
+			btn.classList.toggle('text-cyan-400', isActive);
+			btn.classList.toggle('border-cyan-900/50', isActive);
+			btn.classList.toggle('text-slate-400', !isActive);
+			btn.classList.toggle('border-transparent', !isActive);
+		});
+		document.querySelectorAll('.view-section').forEach(view => {
+			view.classList.toggle('hidden', view.id !== `view-${tabId}`);
+		});
+		const titles = { 'network': 'Network Topology', 'chat': 'Secure Channel', 'identity': 'Node Identity', 'feed': 'Mesh Feed' };
+		document.getElementById('header-title').innerText = titles[tabId];
+	}
+
+	function saveNickname() {
+		const input = document.getElementById('identity-nickname-input');
+		const newName = input.value.trim();
+		if (newName) {
+			fetch('/api/identity', {
+				method: 'POST',
+				headers: {'Content-Type': 'application/json'},
+				body: JSON.stringify({ nickname: newName })
+			}).then(() => {
+				alert("Nickname saved!");
+			}).catch(e => alert("Error saving nickname."));
+		}
+	}
+
+	async function promptAddPeer() {
+		const onion = prompt("Enter Peer Onion Address:");
+		if (!onion) return;
+		try {
+			const res = await fetch('/api/peers/add', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ onion_address: onion }) });
+			if (res.status === 409) alert("Peer exists.");
+		} catch (e) { alert("Error."); }
+	}
+
+	// Set initial tab
+	switchTab('network');
+</script>
 </body>
 </html>
 {{ end }}

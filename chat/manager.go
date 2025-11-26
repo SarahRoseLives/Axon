@@ -81,6 +81,31 @@ func (m *Manager) SaveMessage(targetID string, msg Message) {
 	m.saveInternal()
 }
 
+// NEW: Save a message to the public feed (stored under the special "FEED" key)
+func (m *Manager) SaveFeedMessage(msg Message) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	const feedKey = "FEED"
+	if _, ok := m.Conversations[feedKey]; !ok {
+		m.Conversations[feedKey] = &Conversation{}
+	}
+	conv := m.Conversations[feedKey]
+
+	// Feed messages are always incoming and received
+	msg.Incoming = true
+	msg.Status = "received"
+	conv.Messages = append(conv.Messages, msg)
+	conv.LastActive = time.Now()
+
+	// Keep feed size limited to prevent large data files
+	if len(conv.Messages) > 1000 {
+		conv.Messages = conv.Messages[len(conv.Messages)-1000:]
+	}
+
+	m.saveInternal()
+}
+
 func (m *Manager) UpdateMessageStatus(targetID, msgID, status string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -125,12 +150,33 @@ func (m *Manager) GetHistory(id string) []Message {
 	return []Message{}
 }
 
+// NEW: Get the public feed history
+func (m *Manager) GetFeedHistory() []Message {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	const feedKey = "FEED"
+	if conv, exists := m.Conversations[feedKey]; exists {
+		// Return messages sorted by timestamp, newest first for a feed
+		feed := make([]Message, len(conv.Messages))
+		copy(feed, conv.Messages)
+		sort.Slice(feed, func(i, j int) bool {
+			return feed[i].Timestamp.After(feed[j].Timestamp)
+		})
+		return feed
+	}
+	return []Message{}
+}
+
 func (m *Manager) GetStatusList() []ChatStatus {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	var list []ChatStatus
 	for id, c := range m.Conversations {
+		if id == "FEED" { // Skip the internal feed key from the chat list
+			continue
+		}
 		list = append(list, ChatStatus{
 			PeerID:     id,
 			Unread:     c.Unread,

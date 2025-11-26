@@ -8,9 +8,16 @@ type WireMessage struct {
 	Nonce      string `json:"nonce"`
 }
 
+// NEW: WireMessage for a public, plaintext feed post (no encryption needed)
+type WireFeedMessage struct {
+	From    string `json:"from"`
+	Content string `json:"content"`
+	Nonce   string `json:"nonce"` // Still include a nonce/random value to prevent replay attacks
+}
+
 type Message struct {
-	ID        string    `json:"id"`     // <--- NEW: Unique ID
-	Status    string    `json:"status"` // <--- NEW: pending, sent, received
+	ID        string    `json:"id"`       // <--- Unique ID
+	Status    string    `json:"status"` // <--- pending, sent, received
 	From      string    `json:"from"`
 	To        string    `json:"to"`
 	Content   string    `json:"content"`

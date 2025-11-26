@@ -27,13 +27,66 @@ func StartOutboxLoop(torCtrl *tor.Controller, pm *discovery.PeerManager, chatMgr
 				// We process only 1 message per peer per cycle to avoid congestion
 				if len(msgs) > 0 {
 					msg := msgs[0]
-					fmt.Printf("   -> Retrying msg to %s\n", peerID)
+					fmt.Printf("  -> Retrying msg to %s\n", peerID)
 					// Pass current nickname
 					AttemptSendMessage(torCtrl, pm, chatMgr, peerID, msg, getNickname())
 				}
 			}
 		}
 	}()
+}
+
+// NEW: Send a public post to ALL known peers (gossip)
+func AttemptSendFeedMessage(torCtrl *tor.Controller, pm *discovery.PeerManager, chatMgr *chat.Manager, content, myNickname string) {
+	if torCtrl.Onion == nil { return }
+	client, err := torCtrl.GetHttpClient()
+	if err != nil { return }
+
+	msgID := fmt.Sprintf("%d-%d", time.Now().UnixNano(), time.Now().Unix())
+
+	// We use a nonce to prevent a peer from re-posting our old message
+	nonce := msgID
+
+	// 1. Prepare Wire Payload (Public, plaintext)
+	wireMsg := chat.WireFeedMessage{
+		From:    torCtrl.Onion.ID + ".onion",
+		Content: content,
+		Nonce:   nonce,
+	}
+	jsonBytes, _ := json.Marshal(wireMsg)
+
+	peers := pm.GetPeers()
+	fmt.Printf("📢 Broadcasting feed post to %d peers...\n", len(peers))
+
+	// Broadcast to all peers (non-blocking)
+	for _, peer := range peers {
+		targetPeer := peer.OnionAddress
+		go func(target string) {
+			resp, err := client.Post(
+				fmt.Sprintf("http://%s/api/feed/recv", target),
+				"application/json",
+				bytes.NewBuffer(jsonBytes),
+			)
+			if err == nil && resp.StatusCode == 200 {
+				fmt.Printf("✅ Delivered feed post to %s\n", target)
+			} else if err != nil {
+				fmt.Printf("❌ Failed to deliver feed post to %s: %v\n", target, err)
+			}
+			if resp != nil {
+				resp.Body.Close()
+			}
+		}(targetPeer)
+	}
+
+	// Also save it locally (it's "incoming" from the "me" identity on this node)
+	localMsg := chat.Message{
+		ID:        msgID,
+		From:      torCtrl.Onion.ID + ".onion",
+		To:        "MESH", // Public post target
+		Content:   content,
+		Timestamp: time.Now(),
+	}
+	chatMgr.SaveFeedMessage(localMsg)
 }
 
 // Updated: Now accepts myNickname to pass to PerformHandshake if needed
