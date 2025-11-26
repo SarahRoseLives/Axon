@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	mrand "math/rand" // Using math/rand for initialization
 	"sync"
 	"time"
 )
@@ -12,18 +13,21 @@ import (
 type Peer struct {
 	OnionAddress string    `json:"onion_address"`
 	Nickname     string    `json:"nickname"`
-	IntroducedBy string    `json:"introduced_by"` // <--- NEW FIELD
+	IntroducedBy string    `json:"introduced_by"`
 	TrustLevel   string    `json:"trust_level"`
 	LastSeen     time.Time `json:"last_seen"`
 	PublicKey    string    `json:"public_key"`
 	Status       string    `json:"status"`
 	Blocked      bool      `json:"blocked"`
+	// NEW: Fixed position for stable map rendering
+	XPos         float64   `json:"x_pos"`
+	YPos         float64   `json:"y_pos"`
 }
 
 type PeerManager struct {
-	mu         sync.RWMutex
+	mu           sync.RWMutex
 	KnownPeers map[string]Peer
-	DataDir    string
+	DataDir      string
 }
 
 func NewPeerManager(dataDir string) *PeerManager {
@@ -90,7 +94,7 @@ func (pm *PeerManager) ToggleBlock(onion string) bool {
 
 // --- STANDARD LOGIC ---
 
-// Updated Signature: Now accepts 'introducedBy'
+// Updated: Now accepts 'introducedBy'
 func (pm *PeerManager) AddPeer(onion, trust, pubKey, nickname, introducedBy string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -102,6 +106,8 @@ func (pm *PeerManager) AddPeer(onion, trust, pubKey, nickname, introducedBy stri
 			TrustLevel:   trust,
 			Status:       "unknown",
 			Blocked:      false,
+			XPos:         -1, // Initialize to -1 to signify "not placed yet"
+			YPos:         -1,
 		}
 	}
 
@@ -120,6 +126,16 @@ func (pm *PeerManager) AddPeer(onion, trust, pubKey, nickname, introducedBy stri
 	if p.TrustLevel == "unknown" && trust != "unknown" {
 		p.TrustLevel = trust
 	}
+
+	// NEW: Assign a stable angular position on first appearance
+	if p.XPos == -1 {
+		angle := mrand.Float64() * 2 * 3.14159265359 // Random angle [0, 2*PI]
+		p.XPos = angle
+		// We use YPos to store a random radius factor [0.8, 1.0]
+		// to prevent perfect stacking, making the ring look more natural.
+		p.YPos = mrand.Float64()*0.2 + 0.8
+	}
+
 
 	pm.KnownPeers[onion] = p
 	pm.savePeersInternal()
