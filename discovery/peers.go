@@ -12,12 +12,11 @@ import (
 // Peer represents a node in the network
 type Peer struct {
 	OnionAddress string    `json:"onion_address"`
-	TrustLevel   string    `json:"trust_level"` // "direct" or "transitive"
+	TrustLevel   string    `json:"trust_level"`
 	LastSeen     time.Time `json:"last_seen"`
-	Status       string    `json:"status"` // "online", "offline"
+	Status       string    `json:"status"`
 }
 
-// PeerManager handles the trust graph
 type PeerManager struct {
 	mu         sync.RWMutex
 	KnownPeers map[string]Peer
@@ -33,21 +32,32 @@ func NewPeerManager(dataDir string) *PeerManager {
 	return pm
 }
 
-// AddPeer adds a trusted contact
+// Check if peer exists (Thread-safe)
+func (pm *PeerManager) HasPeer(onion string) bool {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	_, exists := pm.KnownPeers[onion]
+	return exists
+}
+
 func (pm *PeerManager) AddPeer(onion string, trust string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	// If peer exists, update; otherwise create new
+	// Update existing or create new
 	if p, exists := pm.KnownPeers[onion]; exists {
 		p.LastSeen = time.Now()
+		// Only upgrade trust if it was "unknown", otherwise keep existing trust
+		if p.TrustLevel == "unknown" {
+			p.TrustLevel = trust
+		}
 		pm.KnownPeers[onion] = p
 	} else {
 		pm.KnownPeers[onion] = Peer{
 			OnionAddress: onion,
 			TrustLevel:   trust,
 			LastSeen:     time.Now(),
-			Status:       "unknown", // We haven't dialed them yet
+			Status:       "unknown",
 		}
 	}
 	pm.SavePeers()
@@ -65,7 +75,6 @@ func (pm *PeerManager) GetPeers() []Peer {
 	return peers
 }
 
-// Persistence logic
 func (pm *PeerManager) LoadPeers() {
 	path := filepath.Join(pm.DataDir, "peers.json")
 	if _, err := os.Stat(path); os.IsNotExist(err) {
