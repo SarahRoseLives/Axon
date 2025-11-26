@@ -9,12 +9,12 @@ import (
 	"time"
 )
 
-// Peer represents a node in the network
 type Peer struct {
 	OnionAddress string    `json:"onion_address"`
 	TrustLevel   string    `json:"trust_level"`
 	LastSeen     time.Time `json:"last_seen"`
-	Status       string    `json:"status"`
+	PublicKey    string    `json:"public_key"` // Hex Encoded X25519 Key
+	Status       string    `json:"status"`     // <--- Added back to fix the error
 }
 
 type PeerManager struct {
@@ -32,7 +32,6 @@ func NewPeerManager(dataDir string) *PeerManager {
 	return pm
 }
 
-// Check if peer exists (Thread-safe)
 func (pm *PeerManager) HasPeer(onion string) bool {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
@@ -40,34 +39,52 @@ func (pm *PeerManager) HasPeer(onion string) bool {
 	return exists
 }
 
-func (pm *PeerManager) AddPeer(onion string, trust string) {
+func (pm *PeerManager) GetPublicKey(onion string) string {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	if p, ok := pm.KnownPeers[onion]; ok {
+		return p.PublicKey
+	}
+	return ""
+}
+
+// AddPeer adds or updates a peer in the list
+func (pm *PeerManager) AddPeer(onion, trust, pubKey string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	// Update existing or create new
-	if p, exists := pm.KnownPeers[onion]; exists {
-		p.LastSeen = time.Now()
-		// Only upgrade trust if it was "unknown", otherwise keep existing trust
-		if p.TrustLevel == "unknown" {
-			p.TrustLevel = trust
-		}
-		pm.KnownPeers[onion] = p
-	} else {
-		pm.KnownPeers[onion] = Peer{
+	p, exists := pm.KnownPeers[onion]
+	if !exists {
+		p = Peer{
 			OnionAddress: onion,
 			TrustLevel:   trust,
-			LastSeen:     time.Now(),
-			Status:       "unknown",
+			Status:       "unknown", // This line caused the error, but now it is valid
 		}
 	}
-	pm.SavePeers()
-	fmt.Printf("🔭 Peer Added/Updated: %s\n", onion)
+
+	p.LastSeen = time.Now()
+
+	// Update Key if provided
+	if pubKey != "" {
+		p.PublicKey = pubKey
+	}
+
+	// Upgrade trust from unknown to direct/transitive
+	if p.TrustLevel == "unknown" && trust != "unknown" {
+		p.TrustLevel = trust
+	}
+
+	pm.KnownPeers[onion] = p
+	pm.savePeersInternal()
+
+	if !exists || (pubKey != "" && pubKey != p.PublicKey) {
+		fmt.Printf("🔭 Peer Updated: %s (Key: %v)\n", onion, pubKey != "")
+	}
 }
 
 func (pm *PeerManager) GetPeers() []Peer {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
-
 	peers := []Peer{}
 	for _, p := range pm.KnownPeers {
 		peers = append(peers, p)
@@ -75,23 +92,17 @@ func (pm *PeerManager) GetPeers() []Peer {
 	return peers
 }
 
+// Persistence
 func (pm *PeerManager) LoadPeers() {
 	path := filepath.Join(pm.DataDir, "peers.json")
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return
-	}
-
 	data, err := os.ReadFile(path)
 	if err == nil {
-		var loaded map[string]Peer
-		if err := json.Unmarshal(data, &loaded); err == nil {
-			pm.KnownPeers = loaded
-			fmt.Printf("📖 Loaded %d peers from disk.\n", len(loaded))
-		}
+		json.Unmarshal(data, &pm.KnownPeers)
+		fmt.Printf("📖 Loaded %d peers from disk.\n", len(pm.KnownPeers))
 	}
 }
 
-func (pm *PeerManager) SavePeers() {
+func (pm *PeerManager) savePeersInternal() {
 	path := filepath.Join(pm.DataDir, "peers.json")
 	data, _ := json.MarshalIndent(pm.KnownPeers, "", "  ")
 	os.WriteFile(path, data, 0600)

@@ -1,8 +1,11 @@
 package identity
 
 import (
+	"crypto/ecdh"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,12 +17,10 @@ type KeyData struct {
 	PrivateKey string `json:"private_key"`
 }
 
-// LoadOrGenerateKey retrieves a key from disk or creates a new one
-// Now accepts baseDir to ensure isolation between instances
+// 1. ONION IDENTITY (Ed25519) - For Tor Routing
 func LoadOrGenerateKey(baseDir, name string) (ed25519.PrivateKey, error) {
 	keyPath := filepath.Join(baseDir, name+".key")
 
-	// 1. Try to load existing key
 	if data, err := os.ReadFile(keyPath); err == nil {
 		var k KeyData
 		if err := json.Unmarshal(data, &k); err == nil {
@@ -29,27 +30,44 @@ func LoadOrGenerateKey(baseDir, name string) (ed25519.PrivateKey, error) {
 		}
 	}
 
-	// 2. Generate new key if none exists
 	fmt.Printf("🔨 Generating new Identity: %s...\n", name)
 	_, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		return nil, err
 	}
 
-	// 3. Save key to disk
-	k := KeyData{
-		Type:       "ed25519",
-		PrivateKey: base64.StdEncoding.EncodeToString(priv),
-	}
-	jsonData, _ := json.MarshalIndent(k, "", "  ")
-
-	// Ensure dir exists (redundant safety check)
-	os.MkdirAll(baseDir, 0700)
-
-	err = os.WriteFile(keyPath, jsonData, 0600)
-	if err != nil {
-		return nil, fmt.Errorf("failed to save key: %w", err)
-	}
-
+	saveKey(keyPath, "ed25519", base64.StdEncoding.EncodeToString(priv))
 	return priv, nil
+}
+
+// 2. CHAT ENCRYPTION KEY (X25519) - For E2EE
+func LoadOrGenerateChatKey(baseDir string) (*ecdh.PrivateKey, error) {
+	keyPath := filepath.Join(baseDir, "chat_encryption.key")
+
+	if data, err := os.ReadFile(keyPath); err == nil {
+		var k KeyData
+		if err := json.Unmarshal(data, &k); err == nil {
+			bytes, _ := hex.DecodeString(k.PrivateKey)
+			priv, err := ecdh.X25519().NewPrivateKey(bytes)
+			if err == nil {
+				fmt.Printf("🔐 Loaded Chat Encryption Key\n")
+				return priv, nil
+			}
+		}
+	}
+
+	fmt.Println("🛡️  Generating new Chat Encryption Key (X25519)...")
+	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+
+	saveKey(keyPath, "x25519", hex.EncodeToString(priv.Bytes()))
+	return priv, nil
+}
+
+func saveKey(path, typeStr, privStr string) {
+	k := KeyData{Type: typeStr, PrivateKey: privStr}
+	data, _ := json.MarshalIndent(k, "", "  ")
+	os.WriteFile(path, data, 0600)
 }

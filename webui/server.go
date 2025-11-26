@@ -2,14 +2,23 @@ package webui
 
 import (
 	"axon/discovery"
+	"axon/identity"
 	"axon/tor"
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/ecdh"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"log"
-	"math/rand"
+	mrand "math/rand"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -25,8 +34,20 @@ type UIContext struct {
 	Peers      []discovery.Peer
 }
 
+type HandshakeRequest struct {
+	OnionAddress string `json:"onion_address"`
+	PublicKey    string `json:"public_key"`
+}
+
 type PeerListResponse struct {
-	Peers []string `json:"peers"`
+	Peers     []string `json:"peers"`
+	PublicKey string   `json:"public_key"`
+}
+
+type WireMessage struct {
+	From       string `json:"from"`
+	Ciphertext string `json:"ciphertext"`
+	Nonce      string `json:"nonce"`
 }
 
 type Message struct {
@@ -37,41 +58,43 @@ type Message struct {
 	Incoming  bool      `json:"incoming"`
 }
 
-// Conversation wrapper to track metadata
 type Conversation struct {
-	Messages   []Message
-	Unread     bool
-	LastActive time.Time
-	Snippet    string // Short preview of last msg
-}
-
-type ChatStore struct {
-	mu            sync.RWMutex
-	Conversations map[string]*Conversation // Key: Peer Onion Address
-}
-
-// Initialize Store
-var chatStore = ChatStore{
-	Conversations: make(map[string]*Conversation),
-}
-
-// API Response for Chat Sidebar
-type ChatStatus struct {
-	PeerID     string    `json:"peer_id"`
+	Messages   []Message `json:"messages"`
 	Unread     bool      `json:"unread"`
 	LastActive time.Time `json:"last_active"`
 	Snippet    string    `json:"snippet"`
 }
 
+type ChatStore struct {
+	mu            sync.RWMutex
+	Conversations map[string]*Conversation
+	dataDir       string
+}
+
+// --- GLOBALS ---
+var (
+	chatStore = ChatStore{Conversations: make(map[string]*Conversation)}
+	myPrivKey *ecdh.PrivateKey
+)
+
 // --- MAIN SERVER ---
 
 func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
+	dataDir := fmt.Sprintf("data_%d", port)
+	chatStore.dataDir = dataDir
+	loadChatHistory()
+
+	var err error
+	myPrivKey, err = identity.LoadOrGenerateChatKey(dataDir)
+	if err != nil {
+		log.Fatalf("Failed to load chat key: %v", err)
+	}
+
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	fmt.Printf("🖥️  AXON UI Ready at http://%s\n", addr)
 
 	go startGossiping(torCtrl, pm)
 
-	// 1. Render UI
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		status := "Initializing..."
 		onion := "Loading..."
@@ -79,177 +102,147 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 			status = "Online"
 			onion = torCtrl.Onion.ID + ".onion"
 		}
-
 		data := UIContext{
-			AppVersion: "0.9.4-alpha",
+			AppVersion: "0.9.7-beta (Fixed Deadlock)",
 			OnionAddr:  onion,
 			Status:     status,
 			Peers:      pm.GetPeers(),
 		}
-
-		tmpl, err := template.ParseGlob("webui/templates/*.html")
-		if err != nil {
-			http.Error(w, "Template Error: "+err.Error(), 500)
-			return
-		}
-		err = tmpl.ExecuteTemplate(w, "index.html", data)
-		if err != nil {
-			log.Printf("Template render error: %v", err)
-		}
+		tmpl, _ := template.ParseGlob("webui/templates/*.html")
+		tmpl.ExecuteTemplate(w, "index.html", data)
 	})
 
-	// 2. API: Get Peers
 	http.HandleFunc("/api/peers", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		myAddr := ""
-		if torCtrl.Onion != nil {
-			myAddr = torCtrl.Onion.ID + ".onion"
-		}
-		response := map[string]interface{}{
+		if torCtrl.Onion != nil { myAddr = torCtrl.Onion.ID + ".onion" }
+		json.NewEncoder(w).Encode(map[string]interface{}{
 			"self":  myAddr,
 			"peers": pm.GetPeers(),
-		}
-		json.NewEncoder(w).Encode(response)
+		})
 	})
 
-	// 3. API: Add Peer
 	http.HandleFunc("/api/peers/add", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", 405)
-			return
-		}
-		var req struct {
-			OnionAddress string `json:"onion_address"`
-		}
+		if r.Method != http.MethodPost { return }
+		var req struct { OnionAddress string `json:"onion_address"` }
 		json.NewDecoder(r.Body).Decode(&req)
 
-		rawAddr := sanitize(req.OnionAddress)
-		if rawAddr == "" { return }
-		if torCtrl.Onion != nil && rawAddr == torCtrl.Onion.ID + ".onion" { return }
-		if pm.HasPeer(rawAddr) {
-			http.Error(w, "Exists", 409)
-			return
+		target := sanitize(req.OnionAddress)
+		if target == "" { return }
+		if torCtrl.Onion != nil && target == torCtrl.Onion.ID + ".onion" { return }
+
+		if !pm.HasPeer(target) {
+			pm.AddPeer(target, "direct", "")
 		}
 
-		pm.AddPeer(rawAddr, "direct")
-		go syncWithPeer(torCtrl, pm, rawAddr)
+		go performHandshake(torCtrl, pm, target)
 		w.Write([]byte(`{"status":"success"}`))
 	})
 
-	// 4. API: Incoming Handshake
 	http.HandleFunc("/api/peers/announce", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost { return }
-		var req struct {
-			OnionAddress string `json:"onion_address"`
-		}
-		json.NewDecoder(r.Body).Decode(&req)
-		cleanAddr := sanitize(req.OnionAddress)
-		if cleanAddr == "" { return }
+		var req HandshakeRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil { return }
 
-		fmt.Printf("👋 Incoming Handshake from: %s\n", cleanAddr)
-		pm.AddPeer(cleanAddr, "neighbor")
+		from := sanitize(req.OnionAddress)
+		if from == "" { return }
+
+		fmt.Printf("👋 Handshake from %s (Has Key: %v)\n", from, req.PublicKey != "")
+		pm.AddPeer(from, "neighbor", req.PublicKey)
 
 		knownPeers := pm.GetPeers()
 		var peerList []string
 		for _, p := range knownPeers {
 			peerList = append(peerList, p.OnionAddress)
 		}
+
+		myPubKey := hex.EncodeToString(myPrivKey.PublicKey().Bytes())
+
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(PeerListResponse{Peers: peerList})
+		json.NewEncoder(w).Encode(PeerListResponse{
+			Peers:     peerList,
+			PublicKey: myPubKey,
+		})
 	})
 
-	// --- CHAT APIs ---
-
-	// 5. API: Get Chat History (Marks as Read)
+	// --- FIXED DEADLOCK HERE ---
 	http.HandleFunc("/api/chat/history", func(w http.ResponseWriter, r *http.Request) {
 		peer := r.URL.Query().Get("peer")
-		chatStore.mu.Lock() // Lock for write (to clear unread)
-		defer chatStore.mu.Unlock()
 
+		chatStore.mu.Lock()
 		conv, exists := chatStore.Conversations[peer]
-		if !exists {
-			json.NewEncoder(w).Encode([]Message{})
-			return
+		if exists {
+			conv.Unread = false
+			// Use INTERNAL save to avoid double-locking deadlock
+			saveChatHistoryInternal()
 		}
+		chatStore.mu.Unlock()
 
-		// Mark as read
-		conv.Unread = false
-
+		msgs := []Message{}
+		if exists { msgs = conv.Messages }
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(conv.Messages)
+		json.NewEncoder(w).Encode(msgs)
 	})
 
-// 6. API: Get Chat Status
 	http.HandleFunc("/api/chat/status", func(w http.ResponseWriter, r *http.Request) {
 		chatStore.mu.RLock()
 		defer chatStore.mu.RUnlock()
 
-		// CHANGE: Initialize as empty slice, not nil
-		statusList := []ChatStatus{}
-
-		for peerID, conv := range chatStore.Conversations {
-			statusList = append(statusList, ChatStatus{
-				PeerID:     peerID,
-				Unread:     conv.Unread,
-				LastActive: conv.LastActive,
-				Snippet:    conv.Snippet,
+		type ChatStatus struct {
+			PeerID     string    `json:"peer_id"`
+			Unread     bool      `json:"unread"`
+			LastActive time.Time `json:"last_active"`
+			Snippet    string    `json:"snippet"`
+		}
+		list := []ChatStatus{}
+		for id, c := range chatStore.Conversations {
+			list = append(list, ChatStatus{
+				PeerID: id, Unread: c.Unread, LastActive: c.LastActive, Snippet: c.Snippet,
 			})
 		}
-
-		sort.Slice(statusList, func(i, j int) bool {
-			return statusList[i].LastActive.After(statusList[j].LastActive)
-		})
-
+		sort.Slice(list, func(i, j int) bool { return list[i].LastActive.After(list[j].LastActive) })
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(statusList)
+		json.NewEncoder(w).Encode(list)
 	})
 
-	// 7. API: Send Message
 	http.HandleFunc("/api/chat/send", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost { return }
-		var req struct {
-			To      string `json:"to"`
-			Content string `json:"content"`
-		}
+		var req struct { To string `json:"to"`; Content string `json:"content"` }
 		json.NewDecoder(r.Body).Decode(&req)
+
 		if req.To == "" || req.Content == "" { return }
 
-		msg := Message{
-			From:      "me",
-			To:        req.To,
-			Content:   req.Content,
-			Timestamp: time.Now(),
-			Incoming:  false,
+		peerKeyHex := pm.GetPublicKey(req.To)
+		if peerKeyHex == "" {
+			go performHandshake(torCtrl, pm, req.To)
+			http.Error(w, "Peer encryption key missing. Handshaking... Try again in 5s.", 500)
+			return
 		}
 
-		// Update Store
-		chatStore.mu.Lock()
-		if _, ok := chatStore.Conversations[req.To]; !ok {
-			chatStore.Conversations[req.To] = &Conversation{}
+		ciphertext, nonce, err := encryptMessage(peerKeyHex, req.Content)
+		if err != nil {
+			http.Error(w, "Encryption failed", 500)
+			return
 		}
-		conv := chatStore.Conversations[req.To]
-		conv.Messages = append(conv.Messages, msg)
-		conv.LastActive = time.Now()
-		conv.Snippet = "You: " + req.Content
-		if len(conv.Snippet) > 30 { conv.Snippet = conv.Snippet[:27] + "..." }
-		chatStore.mu.Unlock()
 
-		// Send over Tor
-		go func(target, content, me string) {
+		msg := Message{From: "me", To: req.To, Content: req.Content, Timestamp: time.Now(), Incoming: false}
+		saveMessage(req.To, msg)
+
+		go func() {
 			if torCtrl.Onion == nil { return }
 			client, err := torCtrl.GetHttpClient()
 			if err != nil { return }
 
-			outPayload := Message{
-				From:      me + ".onion",
-				Content:   content,
-				Timestamp: time.Now(),
+			wireMsg := WireMessage{
+				From:       torCtrl.Onion.ID + ".onion",
+				Ciphertext: ciphertext,
+				Nonce:      nonce,
 			}
-			jsonBytes, _ := json.Marshal(outPayload)
+			jsonBytes, _ := json.Marshal(wireMsg)
 
 			for i := 0; i < 3; i++ {
 				resp, err := client.Post(
-					fmt.Sprintf("http://%s/api/chat/recv", target),
+					fmt.Sprintf("http://%s/api/chat/recv", req.To),
 					"application/json",
 					bytes.NewBuffer(jsonBytes),
 				)
@@ -259,38 +252,35 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 				}
 				time.Sleep(5 * time.Second)
 			}
-			fmt.Printf("❌ Failed to deliver message to %s\n", target)
-		}(req.To, req.Content, torCtrl.Onion.ID)
+			fmt.Printf("❌ Failed to send to %s\n", req.To)
+		}()
 
 		w.Write([]byte(`{"status":"sent"}`))
 	})
 
-	// 8. API: Receive Message
 	http.HandleFunc("/api/chat/recv", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost { return }
-		var msg Message
-		if err := json.NewDecoder(r.Body).Decode(&msg); err != nil { return }
+		var wireMsg WireMessage
+		if err := json.NewDecoder(r.Body).Decode(&wireMsg); err != nil { return }
 
-		from := sanitize(msg.From)
-		if from == "" { return }
-
-		msg.Incoming = true
-		msg.From = from
-
-		// Update Store & Mark Unread
-		chatStore.mu.Lock()
-		if _, ok := chatStore.Conversations[from]; !ok {
-			chatStore.Conversations[from] = &Conversation{}
+		from := sanitize(wireMsg.From)
+		peerKeyHex := pm.GetPublicKey(from)
+		if peerKeyHex == "" {
+			fmt.Printf("⚠️ Received msg from %s but missing key. Dropping & Handshaking.\n", from)
+			go performHandshake(torCtrl, pm, from)
+			return
 		}
-		conv := chatStore.Conversations[from]
-		conv.Messages = append(conv.Messages, msg)
-		conv.LastActive = time.Now()
-		conv.Unread = true // <--- FLAG UNREAD
-		conv.Snippet = msg.Content
-		if len(conv.Snippet) > 30 { conv.Snippet = conv.Snippet[:27] + "..." }
-		chatStore.mu.Unlock()
 
-		fmt.Printf("📩 Message received from %s\n", from)
+		plaintext, err := decryptMessage(peerKeyHex, wireMsg.Ciphertext, wireMsg.Nonce)
+		if err != nil {
+			fmt.Printf("⚠️ Decryption failed from %s: %v\n", from, err)
+			return
+		}
+
+		msg := Message{From: from, To: "me", Content: plaintext, Timestamp: time.Now(), Incoming: true}
+		saveMessage(from, msg)
+
+		fmt.Printf("📩 Encrypted msg received from %s\n", from)
 		w.Write([]byte(`{"status":"received"}`))
 	})
 
@@ -299,10 +289,134 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 	}
 }
 
-// --- HELPERS ---
+// --- LOGIC HELPERS ---
 
-func sanitize(input string) string {
-	s := strings.TrimSpace(input)
+func saveMessage(peerID string, msg Message) {
+	chatStore.mu.Lock()
+	defer chatStore.mu.Unlock()
+
+	if _, ok := chatStore.Conversations[peerID]; !ok {
+		chatStore.Conversations[peerID] = &Conversation{}
+	}
+	conv := chatStore.Conversations[peerID]
+	conv.Messages = append(conv.Messages, msg)
+	conv.LastActive = time.Now()
+
+	preview := msg.Content
+	if len(preview) > 30 { preview = preview[:27] + "..." }
+	if msg.Incoming {
+		conv.Unread = true
+		conv.Snippet = preview
+	} else {
+		conv.Snippet = "You: " + preview
+	}
+
+	saveChatHistoryInternal()
+}
+
+func performHandshake(torCtrl *tor.Controller, pm *discovery.PeerManager, target string) {
+	if torCtrl.Onion == nil { return }
+	client, err := torCtrl.GetHttpClient()
+	if err != nil { return }
+
+	myPubKey := hex.EncodeToString(myPrivKey.PublicKey().Bytes())
+	payload := HandshakeRequest{
+		OnionAddress: torCtrl.Onion.ID + ".onion",
+		PublicKey:    myPubKey,
+	}
+	jsonBytes, _ := json.Marshal(payload)
+
+	for i := 1; i <= 3; i++ {
+		resp, err := client.Post(
+			fmt.Sprintf("http://%s/api/peers/announce", target),
+			"application/json",
+			bytes.NewBuffer(jsonBytes),
+		)
+		if err == nil {
+			defer resp.Body.Close()
+			if resp.StatusCode == 200 {
+				var response PeerListResponse
+				if err := json.NewDecoder(resp.Body).Decode(&response); err == nil {
+
+					if response.PublicKey != "" {
+						pm.AddPeer(target, "direct", response.PublicKey)
+					}
+
+					for _, p := range response.Peers {
+						clean := sanitize(p)
+						if clean != payload.OnionAddress && !pm.HasPeer(clean) {
+							pm.AddPeer(clean, "transitive", "")
+						}
+					}
+				}
+				fmt.Printf("✅ Handshake complete with %s\n", target)
+				return
+			}
+		}
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func loadChatHistory() {
+	path := filepath.Join(chatStore.dataDir, "chats.json")
+	data, err := os.ReadFile(path)
+	if err == nil {
+		json.Unmarshal(data, &chatStore.Conversations)
+		fmt.Printf("📂 Loaded history for %d chats\n", len(chatStore.Conversations))
+	}
+}
+
+// This function locks
+func saveChatHistory() {
+	chatStore.mu.Lock()
+	defer chatStore.mu.Unlock()
+	saveChatHistoryInternal()
+}
+
+// This function DOES NOT lock (safe to call when you already have the lock)
+func saveChatHistoryInternal() {
+	path := filepath.Join(chatStore.dataDir, "chats.json")
+	data, _ := json.MarshalIndent(chatStore.Conversations, "", "  ")
+	os.WriteFile(path, data, 0600)
+}
+
+func encryptMessage(peerPubKeyHex, plaintext string) (string, string, error) {
+	peerBytes, err := hex.DecodeString(peerPubKeyHex)
+	if err != nil { return "", "", err }
+	peerKey, err := ecdh.X25519().NewPublicKey(peerBytes)
+	if err != nil { return "", "", err }
+
+	sharedSecret, err := myPrivKey.ECDH(peerKey)
+	if err != nil { return "", "", err }
+
+	block, _ := aes.NewCipher(sharedSecret)
+	gcm, _ := cipher.NewGCM(block)
+
+	nonce := make([]byte, gcm.NonceSize())
+	io.ReadFull(rand.Reader, nonce)
+
+	ciphertext := gcm.Seal(nil, nonce, []byte(plaintext), nil)
+	return hex.EncodeToString(ciphertext), hex.EncodeToString(nonce), nil
+}
+
+func decryptMessage(peerPubKeyHex, ciphertextHex, nonceHex string) (string, error) {
+	peerBytes, _ := hex.DecodeString(peerPubKeyHex)
+	peerKey, _ := ecdh.X25519().NewPublicKey(peerBytes)
+	sharedSecret, _ := myPrivKey.ECDH(peerKey)
+
+	block, _ := aes.NewCipher(sharedSecret)
+	gcm, _ := cipher.NewGCM(block)
+
+	nonce, _ := hex.DecodeString(nonceHex)
+	ciphertext, _ := hex.DecodeString(ciphertextHex)
+
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil { return "", err }
+	return string(plaintext), nil
+}
+
+func sanitize(s string) string {
+	s = strings.TrimSpace(s)
 	s = strings.TrimPrefix(s, "http://")
 	s = strings.TrimSuffix(s, "/")
 	return s
@@ -314,44 +428,9 @@ func startGossiping(torCtrl *tor.Controller, pm *discovery.PeerManager) {
 		time.Sleep(60 * time.Second)
 		if torCtrl.Onion == nil { continue }
 		peers := pm.GetPeers()
-		if len(peers) == 0 { continue }
-		randomIndex := rand.Intn(len(peers))
-		target := peers[randomIndex]
-		go syncWithPeer(torCtrl, pm, target.OnionAddress)
-	}
-}
-
-func syncWithPeer(torCtrl *tor.Controller, pm *discovery.PeerManager, target string) {
-	if torCtrl.Onion == nil { return }
-	client, err := torCtrl.GetHttpClient()
-	if err != nil { return }
-
-	me := torCtrl.Onion.ID + ".onion"
-	payload := map[string]string{"onion_address": me}
-	jsonPayload, _ := json.Marshal(payload)
-
-	for i := 1; i <= 3; i++ {
-		resp, err := client.Post(
-			fmt.Sprintf("http://%s/api/peers/announce", target),
-			"application/json",
-			bytes.NewBuffer(jsonPayload),
-		)
-		if err == nil {
-			defer resp.Body.Close()
-			if resp.StatusCode == 200 {
-				var gossip PeerListResponse
-				if err := json.NewDecoder(resp.Body).Decode(&gossip); err == nil {
-					for _, newPeer := range gossip.Peers {
-						clean := sanitize(newPeer)
-						if clean != me && !pm.HasPeer(clean) {
-							fmt.Printf("💡 Learned about %s via %s\n", clean, target)
-							pm.AddPeer(clean, "transitive")
-						}
-					}
-				}
-				return
-			}
+		if len(peers) > 0 {
+			target := peers[mrand.Intn(len(peers))].OnionAddress
+			go performHandshake(torCtrl, pm, target)
 		}
-		time.Sleep(10 * time.Second)
 	}
 }
