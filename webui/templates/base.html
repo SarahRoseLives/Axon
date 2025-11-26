@@ -16,6 +16,14 @@
             background-image: radial-gradient(#334155 1px, transparent 1px);
             background-size: 8px 8px;
         }
+        /* Pulse animation for the graph nodes */
+        @keyframes gentle-pulse {
+            0%, 100% { transform: scale(1); opacity: 0.5; }
+            50% { transform: scale(1.1); opacity: 0.2; }
+        }
+        .node-pulse {
+            animation: gentle-pulse 3s infinite;
+        }
     </style>
 </head>
 <body class="bg-slate-950 text-slate-200 font-sans selection:bg-cyan-900 selection:text-cyan-100 overflow-hidden h-screen w-full flex">
@@ -25,9 +33,153 @@
     <script>
         lucide.createIcons();
 
-        // --- Tab Switching Logic ---
+        // --- Topology Visualization Logic ---
+        function renderTopology(peers, selfAddress) {
+            const svg = document.getElementById('topology-svg');
+            const nodesContainer = document.getElementById('topology-nodes');
+            const container = document.getElementById('topology-container');
+
+            if (!svg || !nodesContainer || !container) return;
+
+            // Dimensions
+            const w = container.clientWidth;
+            const h = container.clientHeight;
+            const cx = w / 2;
+            const cy = h / 2;
+            const radius = Math.min(w, h) / 3.5; // Distance of peers from center
+
+            // Clear previous
+            svg.innerHTML = '';
+            nodesContainer.innerHTML = '';
+
+            // 1. Draw SELF Node (Center)
+            const selfHtml = `
+                <div class="absolute transform -translate-x-1/2 -translate-y-1/2 flex flex-col items-center justify-center pointer-events-auto cursor-pointer" style="left: ${cx}px; top: ${cy}px">
+                     <div class="w-16 h-16 rounded-full bg-slate-900 border-2 border-cyan-500 z-10 flex items-center justify-center shadow-[0_0_20px_rgba(6,182,212,0.3)]">
+                        <i data-lucide="user" class="w-6 h-6 text-cyan-500"></i>
+                     </div>
+                     <div class="absolute w-24 h-24 rounded-full border border-cyan-500/30 node-pulse z-0"></div>
+                     <div class="mt-2 text-[10px] font-mono text-cyan-400 bg-black/50 px-2 py-0.5 rounded border border-cyan-900/50">You</div>
+                </div>
+            `;
+            nodesContainer.innerHTML += selfHtml;
+
+            // 2. Draw PEER Nodes (Orbit)
+            const count = peers.length;
+            if (count === 0) return;
+
+            const angleStep = (2 * Math.PI) / count;
+
+            peers.forEach((peer, index) => {
+                const angle = index * angleStep;
+                const px = cx + radius * Math.cos(angle);
+                const py = cy + radius * Math.sin(angle);
+
+                // Determine Color based on trust
+                const isDirect = peer.trust_level === 'direct' || peer.trust_level === 'neighbor';
+                const borderColor = isDirect ? 'border-emerald-500' : 'border-amber-500';
+                const textColor = isDirect ? 'text-emerald-500' : 'text-amber-500';
+                const icon = isDirect ? 'shield' : 'share-2';
+
+                // A. Draw Line
+                const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+                line.setAttribute("x1", cx);
+                line.setAttribute("y1", cy);
+                line.setAttribute("x2", px);
+                line.setAttribute("y2", py);
+                line.setAttribute("stroke", isDirect ? "#10b981" : "#f59e0b");
+                line.setAttribute("stroke-width", "1");
+                line.setAttribute("stroke-opacity", "0.3");
+                if (!isDirect) line.setAttribute("stroke-dasharray", "4,4");
+                svg.appendChild(line);
+
+                // B. Draw Node
+                const shortAddr = peer.onion_address.substring(0, 8) + "...";
+
+                const nodeHtml = `
+                <div class="absolute transform -translate-x-1/2 -translate-y-1/2 flex flex-col items-center justify-center pointer-events-auto cursor-pointer hover:scale-110 transition-transform duration-200" style="left: ${px}px; top: ${py}px" title="${peer.onion_address}">
+                     <div class="w-12 h-12 rounded-full bg-slate-900 border-2 ${borderColor} z-10 flex items-center justify-center shadow-lg">
+                        <i data-lucide="${icon}" class="w-5 h-5 ${textColor}"></i>
+                     </div>
+                     <div class="mt-2 text-[10px] font-mono text-slate-400 bg-black/50 px-2 py-0.5 rounded border border-slate-800">${shortAddr}</div>
+                </div>
+                `;
+                nodesContainer.innerHTML += nodeHtml;
+            });
+
+            // Re-init icons for injected HTML
+            lucide.createIcons();
+        }
+
+        // --- Polling Logic ---
+        function startPolling() {
+            setInterval(async () => {
+                const netView = document.getElementById('view-network');
+                if (netView && netView.classList.contains('hidden')) return;
+
+                try {
+                    const res = await fetch('/api/peers');
+                    if (!res.ok) return;
+
+                    // NEW RESPONSE FORMAT: { self: "...", peers: [...] }
+                    const data = await res.json();
+                    const peers = data.peers || [];
+                    const myAddr = data.self || "";
+
+                    // Update HUD Count
+                    const hudCount = document.getElementById('hud-node-count');
+                    if (hudCount) hudCount.innerText = peers.length + 1; // Peers + Self
+
+                    // Render Map
+                    renderTopology(peers, myAddr);
+
+                    // Update Table
+                    const listContainer = document.getElementById('peer-list-container');
+                    if (!listContainer) return;
+
+                    if (peers.length === 0) {
+                        listContainer.innerHTML = `
+                            <div class="p-8 text-center text-slate-500 text-sm">
+                                No peers found. Click the <i data-lucide="user-plus" class="w-4 h-4 inline mx-1"></i> icon above to add one.
+                            </div>`;
+                        lucide.createIcons();
+                        return;
+                    }
+
+                    // Build List HTML
+                    const listHtml = peers.map(p => {
+                        const date = new Date(p.last_seen);
+                        const timeStr = date.toLocaleTimeString([], { hour12: false });
+                        return `
+                        <div class="grid grid-cols-12 gap-4 text-sm py-3 px-2 border-b border-slate-800/50 hover:bg-slate-800/50 cursor-pointer transition-colors group">
+                            <div class="col-span-6 font-mono text-slate-400 truncate group-hover:text-cyan-400" title="${p.onion_address}">
+                                ${p.onion_address}
+                            </div>
+                            <div class="col-span-3 flex items-center gap-1 text-slate-400">
+                                <i data-lucide="shield" class="w-3 h-3 text-emerald-500"></i> ${p.trust_level}
+                            </div>
+                            <div class="col-span-3 text-right text-slate-500 text-xs">
+                                ${timeStr}
+                            </div>
+                        </div>
+                        `;
+                    }).join('');
+
+                    if (listContainer.innerHTML.length !== listHtml.length) {
+                         listContainer.innerHTML = listHtml;
+                         lucide.createIcons();
+                    }
+
+                } catch (e) {
+                    console.error("Polling error:", e);
+                }
+            }, 2000); // 2 seconds
+        }
+
+        startPolling();
+
+        // --- Standard UI Logic ---
         function switchTab(tabId) {
-            // Update Sidebar
             document.querySelectorAll('.nav-btn').forEach(btn => {
                 if(btn.dataset.target === tabId) {
                     btn.classList.add('bg-cyan-950/30', 'text-cyan-400', 'border-cyan-900/50');
@@ -38,7 +190,6 @@
                 }
             });
 
-            // Update Views
             document.querySelectorAll('.view-section').forEach(view => {
                 if(view.id === `view-${tabId}`) {
                     view.classList.remove('hidden');
@@ -47,7 +198,12 @@
                 }
             });
 
-            // Update Header Title
+            // Trigger a redraw if switching to network to ensure sizes are correct
+            if(tabId === 'network') {
+                const svg = document.getElementById('topology-svg');
+                if(svg) svg.innerHTML = ''; // Force refresh next poll
+            }
+
             const titles = {
                 'network': 'Network Topology',
                 'chat': 'Secure Channel',
@@ -56,7 +212,6 @@
             document.getElementById('header-title').innerText = titles[tabId];
         }
 
-        // --- API: Add Peer ---
         async function promptAddPeer() {
             const onion = prompt("Enter Peer Onion Address (e.g., vngrd...a2s1.onion):");
             if (!onion) return;
@@ -69,8 +224,9 @@
                 });
 
                 if (response.ok) {
-                    alert("Peer added! Refreshing...");
-                    window.location.reload();
+                    // Handled by poller
+                } else if (response.status === 409) {
+                    alert("This peer is already in your list.");
                 } else {
                     alert("Failed to add peer.");
                 }

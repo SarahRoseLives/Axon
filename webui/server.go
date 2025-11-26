@@ -51,7 +51,24 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 		}
 	})
 
-	// 2. API: Add Peer (Outgoing Handshake)
+	// 2. API: Get Peers + Self Identity (Updated)
+	http.HandleFunc("/api/peers", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		myAddr := ""
+		if torCtrl.Onion != nil {
+			myAddr = torCtrl.Onion.ID + ".onion"
+		}
+
+		response := map[string]interface{}{
+			"self":  myAddr,
+			"peers": pm.GetPeers(),
+		}
+
+		json.NewEncoder(w).Encode(response)
+	})
+
+	// 3. API: Add Peer
 	http.HandleFunc("/api/peers/add", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", 405)
@@ -66,7 +83,6 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 			return
 		}
 
-		// --- SANITIZATION ---
 		rawAddr := strings.TrimSpace(req.OnionAddress)
 		rawAddr = strings.TrimPrefix(rawAddr, "http://")
 		rawAddr = strings.TrimSuffix(rawAddr, "/")
@@ -86,10 +102,8 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 			return
 		}
 
-		// A. Add locally
 		pm.AddPeer(rawAddr, "direct")
 
-		// B. Announce (Handshake)
 		go func(target, me string) {
 			if torCtrl.Onion == nil { return }
 
@@ -105,8 +119,6 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 
 			maxRetries := 3
 			for i := 1; i <= maxRetries; i++ {
-				fmt.Printf("   ... Attempt %d/%d\n", i, maxRetries)
-
 				resp, err := client.Post(
 					fmt.Sprintf("http://%s/api/peers/announce", target),
 					"application/json",
@@ -119,24 +131,16 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager) {
 						fmt.Printf("✅ Handshake success! %s knows us now.\n", target)
 						return
 					}
-					fmt.Printf("⚠️ Peer returned status: %d\n", resp.StatusCode)
-				} else {
-					fmt.Printf("⚠️ Connection failed: %v\n", err)
 				}
-
-				if i < maxRetries {
-					time.Sleep(10 * time.Second)
-				}
+				if i < maxRetries { time.Sleep(10 * time.Second) }
 			}
-
-			fmt.Printf("❌ Handshake gave up after %d attempts.\n", maxRetries)
-
+			fmt.Printf("❌ Handshake failed after %d attempts.\n", maxRetries)
 		}(rawAddr, torCtrl.Onion.ID)
 
 		w.Write([]byte(`{"status":"success"}`))
 	})
 
-	// 3. API: Incoming Handshake
+	// 4. API: Incoming Handshake
 	http.HandleFunc("/api/peers/announce", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", 405)

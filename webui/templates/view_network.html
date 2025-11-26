@@ -1,13 +1,22 @@
 {{ define "view_network" }}
 <div id="view-network" class="view-section h-full flex flex-col">
-    <div class="flex-1 relative bg-slate-900 flex items-center justify-center overflow-hidden">
-        <div class="absolute inset-0 opacity-10 pattern-dots"></div>
-        <div class="text-center">
-            <div class="w-16 h-16 rounded-full bg-slate-800 border-2 border-cyan-500 mx-auto mb-4 flex items-center justify-center">
-                <i data-lucide="user" class="w-8 h-8 text-cyan-500"></i>
+    <div class="flex-1 relative bg-slate-900 flex items-center justify-center overflow-hidden" id="topology-container">
+        <div class="absolute inset-0 opacity-10 pattern-dots pointer-events-none"></div>
+
+        <svg id="topology-svg" class="absolute inset-0 w-full h-full pointer-events-none z-0"></svg>
+
+        <div id="topology-nodes" class="absolute inset-0 w-full h-full z-10 pointer-events-none">
             </div>
-            <p class="text-slate-500 font-mono text-sm">Network Visualization</p>
-            <p class="text-slate-600 text-xs mt-1">Nodes: {{ len .Peers }}</p>
+
+        <div class="absolute top-4 right-4 bg-slate-800/80 backdrop-blur p-3 rounded-lg border border-slate-700 text-xs font-mono text-slate-300 shadow-xl z-20">
+            <div class="flex items-center gap-2 mb-2">
+                <i data-lucide="activity" class="w-3 h-3 text-cyan-400"></i>
+                <span>Topology Status</span>
+            </div>
+            <div class="grid grid-cols-2 gap-x-6 gap-y-1">
+                <span class="text-slate-500">Nodes</span> <span id="hud-node-count">0</span>
+                <span class="text-slate-500">Self</span> <span class="text-cyan-400">Active</span>
+            </div>
         </div>
     </div>
 
@@ -23,23 +32,25 @@
                 <div class="col-span-3 text-right">LAST SEEN</div>
             </div>
 
-            {{ range .Peers }}
-            <div class="grid grid-cols-12 gap-4 text-sm py-3 px-2 border-b border-slate-800/50 hover:bg-slate-800/50 cursor-pointer transition-colors group">
-                <div class="col-span-6 font-mono text-slate-400 truncate group-hover:text-cyan-400" title="{{ .OnionAddress }}">
-                    {{ .OnionAddress }}
+            <div id="peer-list-container">
+                {{ range .Peers }}
+                <div class="grid grid-cols-12 gap-4 text-sm py-3 px-2 border-b border-slate-800/50 hover:bg-slate-800/50 cursor-pointer transition-colors group">
+                    <div class="col-span-6 font-mono text-slate-400 truncate group-hover:text-cyan-400" title="{{ .OnionAddress }}">
+                        {{ .OnionAddress }}
+                    </div>
+                    <div class="col-span-3 flex items-center gap-1 text-slate-400">
+                        <i data-lucide="shield" class="w-3 h-3 text-emerald-500"></i> {{ .TrustLevel }}
+                    </div>
+                    <div class="col-span-3 text-right text-slate-500 text-xs">
+                        {{ .LastSeen.Format "15:04:05" }}
+                    </div>
                 </div>
-                <div class="col-span-3 flex items-center gap-1 text-slate-400">
-                    <i data-lucide="shield" class="w-3 h-3 text-emerald-500"></i> {{ .TrustLevel }}
+                {{ else }}
+                <div class="p-8 text-center text-slate-500 text-sm">
+                    No peers found. Click the <i data-lucide="user-plus" class="w-4 h-4 inline mx-1"></i> icon above to add one.
                 </div>
-                <div class="col-span-3 text-right text-slate-500 text-xs">
-                    {{ .LastSeen.Format "15:04:05" }}
-                </div>
+                {{ end }}
             </div>
-            {{ else }}
-            <div class="p-8 text-center text-slate-500 text-sm">
-                No peers found. Click the <i data-lucide="user-plus" class="w-4 h-4 inline mx-1"></i> icon above to add one.
-            </div>
-            {{ end }}
         </div>
     </div>
 </div>
