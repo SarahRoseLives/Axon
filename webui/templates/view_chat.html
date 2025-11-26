@@ -1,13 +1,43 @@
 {{ define "view_chat" }}
-<div id="view-chat" class="view-section hidden h-full flex items-center justify-center bg-slate-950">
-    <div class="text-center">
-        <div class="w-16 h-16 rounded-full bg-slate-900 border border-slate-800 mx-auto mb-4 flex items-center justify-center">
-            <i data-lucide="message-square" class="w-8 h-8 text-slate-600"></i>
+<div id="view-chat" class="view-section hidden h-full flex">
+    <div class="w-64 border-r border-slate-800 bg-slate-900/30 hidden md:flex flex-col">
+        <div class="p-3 border-b border-slate-800">
+            <input type="text" placeholder="Search peers..." class="w-full bg-slate-900 border border-slate-700 rounded text-xs p-2 text-slate-200 placeholder-slate-600 focus:border-cyan-500 outline-none transition-colors">
         </div>
-        <h3 class="text-slate-400 text-lg">Select a Peer</h3>
-        <p class="text-slate-600 text-sm max-w-xs mx-auto mt-2">
-            Encrypted comms are ready. Select a peer from the topology tab to start a session.
-        </p>
+
+        <div id="chat-peer-list" class="flex-1 overflow-y-auto">
+             <div class="p-4 text-xs text-slate-600 text-center italic">Loading contacts...</div>
+        </div>
+    </div>
+
+    <div class="flex-1 flex flex-col bg-slate-950">
+        <div id="chat-header" class="h-14 border-b border-slate-800 flex items-center px-6 justify-between bg-slate-900/20">
+            <div class="flex items-center gap-3">
+                <div class="w-2 h-2 rounded-full bg-slate-600" id="header-status-dot"></div>
+                <span id="active-chat-peer" class="font-mono text-slate-400">No Peer Selected</span>
+            </div>
+        </div>
+
+        <div id="chat-messages" class="flex-1 overflow-y-auto p-4 space-y-4">
+            <div class="flex justify-center mt-10 opacity-50">
+                <i data-lucide="message-square" class="w-12 h-12 text-slate-800"></i>
+            </div>
+        </div>
+
+        <div class="p-4 border-t border-slate-800 bg-slate-900/20">
+            <form id="chat-form" class="flex gap-2" onsubmit="sendChat(event)">
+                <input
+                    id="chat-input"
+                    type="text"
+                    placeholder="Select a peer to chat..."
+                    class="flex-1 bg-slate-800 border-none rounded-md px-4 py-3 text-sm text-slate-200 focus:ring-1 focus:ring-cyan-500 outline-none"
+                    disabled
+                >
+                <button type="submit" id="chat-send-btn" class="bg-cyan-900 text-slate-500 p-3 rounded-md cursor-not-allowed" disabled>
+                    <i data-lucide="send" class="w-5 h-5"></i>
+                </button>
+            </form>
+        </div>
     </div>
 </div>
 {{ end }}
