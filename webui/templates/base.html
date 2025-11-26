@@ -27,30 +27,83 @@
     <script>
         lucide.createIcons();
         let activePeer = null;
+        let globalPeerData = [];
 
-        // --- IDENTITY LOGIC ---
-        async function saveNickname() {
-            const input = document.getElementById('identity-nickname-input');
-            const name = input.value.trim();
-            if(!name) return;
-
+        // --- MANAGEMENT ACTIONS ---
+        async function deletePeer() {
+            if(!activePeer || !confirm("Delete this peer and all chat history?")) return;
             try {
-                const res = await fetch('/api/identity', {
+                await fetch('/api/peers/delete', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ nickname: name })
+                    body: JSON.stringify({ onion_address: activePeer })
                 });
-                if (res.ok) {
-                    alert("Identity Saved! It will be shared in the next handshake.");
-                    // Force a reload to update header instantly? Or just wait for poll.
-                }
-            } catch(e) {
-                console.error("Failed to save nickname", e);
-                alert("Error saving identity.");
+                alert("Peer deleted.");
+                window.location.reload();
+            } catch(e) { alert("Error deleting."); }
+        }
+
+        async function toggleBlockPeer() {
+            if(!activePeer) return;
+            try {
+                const res = await fetch('/api/peers/block', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ onion_address: activePeer })
+                });
+                const data = await res.json();
+                alert(data.blocked ? "Peer Blocked." : "Peer Unblocked.");
+            } catch(e) { alert("Error updating block status."); }
+        }
+
+        // --- RENDERERS ---
+
+        // 1. Update the "Trusted Neighbors" Table
+        function renderPeerList(peers) {
+            const container = document.getElementById('peer-list-container');
+            if (!container) return;
+
+            if (peers.length === 0) {
+                container.innerHTML = `
+                    <div class="p-8 text-center text-slate-500 text-sm">
+                        No peers found. Click the <i data-lucide="user-plus" class="w-4 h-4 inline mx-1"></i> icon above to add one.
+                    </div>`;
+                lucide.createIcons();
+                return;
+            }
+
+            const html = peers.map(p => {
+                const date = new Date(p.last_seen);
+                const timeStr = date.toLocaleTimeString([], { hour12: false });
+                const displayName = p.nickname || p.onion_address;
+                const blockedClass = p.blocked ? "opacity-50 grayscale" : "";
+                const blockedText = p.blocked ? '<span class="text-red-500 text-[10px] ml-2">BLOCKED</span>' : "";
+
+                return `
+                <div class="grid grid-cols-12 gap-4 text-sm py-3 px-2 border-b border-slate-800/50 hover:bg-slate-800/50 cursor-pointer transition-colors group ${blockedClass}" onclick="openChat('${p.onion_address}', '${p.nickname}')">
+                    <div class="col-span-6 font-mono text-slate-400 truncate group-hover:text-cyan-400" title="${p.onion_address}">
+                        ${displayName}
+                        ${blockedText}
+                        ${p.nickname ? `<span class="text-slate-600 text-[10px] ml-1 hidden group-hover:inline">${p.onion_address.substring(0,8)}...</span>` : ''}
+                    </div>
+                    <div class="col-span-3 flex items-center gap-1 text-slate-400">
+                        <i data-lucide="shield" class="w-3 h-3 text-emerald-500"></i> ${p.trust_level}
+                    </div>
+                    <div class="col-span-3 text-right text-slate-500 text-xs">
+                        ${timeStr}
+                    </div>
+                </div>
+                `;
+            }).join('');
+
+            // Simple diff check to avoid redrawing if nothing changed (prevents scroll jumping)
+            if (container.innerHTML.length !== html.length) {
+                container.innerHTML = html;
+                lucide.createIcons();
             }
         }
 
-        // --- Render Chat Sidebar ---
+        // 2. Update Chat Sidebar
         function renderChatSidebar(peers, chatStatusMap) {
             const container = document.getElementById('chat-peer-list');
             if (!container) return;
@@ -78,14 +131,15 @@
                 const snippet = status.snippet || "No messages yet";
                 const snippetClass = status.unread ? 'text-slate-200 font-medium' : 'text-slate-500';
 
-                // DISPLAY NAME LOGIC
                 const displayName = p.nickname || p.onion_address;
-                const subtext = p.nickname ? p.onion_address.substring(0,12)+"..." : "";
+                const blockedIcon = p.blocked ? '<i data-lucide="ban" class="w-3 h-3 text-amber-500 ml-1"></i>' : '';
 
                 return `
                 <div onclick="openChat('${p.onion_address}', '${p.nickname}')" class="p-3 cursor-pointer transition-all ${activeClass} border-b border-slate-800/50">
                     <div class="flex justify-between items-start mb-1">
-                        <span class="font-medium text-sm text-slate-200 truncate w-32" title="${p.onion_address}">${displayName}</span>
+                        <span class="font-medium text-sm text-slate-200 truncate w-32 flex items-center" title="${p.onion_address}">
+                            ${displayName} ${blockedIcon}
+                        </span>
                         ${badge}
                     </div>
                     <div class="text-[10px] ${snippetClass} font-mono truncate">${snippet}</div>
@@ -94,12 +148,13 @@
 
             if (container.innerHTML.length !== html.length && html.length > 0) {
                 container.innerHTML = html;
+                lucide.createIcons();
             } else if (peers.length === 0) {
                  container.innerHTML = '<div class="p-4 text-xs text-slate-600 text-center italic">No peers found.</div>';
             }
         }
 
-        // --- Render Topology ---
+        // 3. Update Topology Map
         function renderTopology(peers, selfAddress) {
             const nodesContainer = document.getElementById('topology-nodes');
             const svg = document.getElementById('topology-svg');
@@ -131,17 +186,18 @@
                     const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
                     line.setAttribute("x1", cx); line.setAttribute("y1", cy);
                     line.setAttribute("x2", px); line.setAttribute("y2", py);
-                    line.setAttribute("stroke", isDirect ? "#10b981" : "#f59e0b");
+
+                    const strokeColor = peer.blocked ? "#ef4444" : (isDirect ? "#10b981" : "#f59e0b");
+
+                    line.setAttribute("stroke", strokeColor);
                     line.setAttribute("stroke-width", "1");
                     line.setAttribute("stroke-opacity", "0.3");
                     if (!isDirect) line.setAttribute("stroke-dasharray", "4,4");
                     svg.appendChild(line);
 
-                    const borderColor = isDirect ? 'border-emerald-500' : 'border-amber-500';
-                    const textColor = isDirect ? 'text-emerald-500' : 'text-amber-500';
-                    const icon = isDirect ? 'shield' : 'share-2';
-
-                    // USE NICKNAME IF AVAILABLE
+                    const borderColor = peer.blocked ? 'border-red-500' : (isDirect ? 'border-emerald-500' : 'border-amber-500');
+                    const textColor = peer.blocked ? 'text-red-500' : (isDirect ? 'text-emerald-500' : 'text-amber-500');
+                    const icon = peer.blocked ? 'ban' : (isDirect ? 'shield' : 'share-2');
                     const label = peer.nickname || peer.onion_address.substring(0,8)+"...";
 
                     html += `
@@ -162,7 +218,6 @@
             activePeer = peerID;
             switchTab('chat');
 
-            // Show Nickname in header if available
             const displayName = (nickname && nickname !== "undefined" && nickname !== "") ? nickname : peerID;
 
             const headerHtml = `
@@ -257,7 +312,9 @@
                 const resPeers = await fetch('/api/peers');
                 if (!resPeers.ok) return;
                 const dataPeers = await resPeers.json();
-                const peers = dataPeers.peers || [];
+
+                globalPeerData = dataPeers.peers || [];
+                const peers = globalPeerData;
                 const selfAddr = dataPeers.self || "";
 
                 const resStatus = await fetch('/api/chat/status');
@@ -277,6 +334,7 @@
                      const hud = document.getElementById('hud-node-count');
                      if(hud) hud.innerText = peers.length + 1;
                      renderTopology(peers, selfAddr);
+                     renderPeerList(peers); // <--- FIXED: Now updates the table!
                 }
 
                 const chatView = document.getElementById('view-chat');

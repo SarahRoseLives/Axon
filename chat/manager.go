@@ -38,33 +38,39 @@ func NewManager(dataDir string) (*Manager, error) {
 	return mgr, nil
 }
 
-// --- MESSAGE LOGIC ---
+// --- MANAGEMENT ---
 
-func (m *Manager) SaveMessage(peerID string, msg Message) {
+func (m *Manager) DeleteConversation(peerID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if _, ok := m.Conversations[peerID]; !ok {
-		m.Conversations[peerID] = &Conversation{}
+	if _, exists := m.Conversations[peerID]; exists {
+		delete(m.Conversations, peerID)
+		m.saveInternal()
+		fmt.Printf("🗑️ Deleted conversation with %s\n", peerID)
 	}
-	conv := m.Conversations[peerID]
+}
 
-	// Default status if missing
+// --- MESSAGE LOGIC ---
+
+func (m *Manager) SaveMessage(targetID string, msg Message) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, ok := m.Conversations[targetID]; !ok {
+		m.Conversations[targetID] = &Conversation{}
+	}
+	conv := m.Conversations[targetID]
+
 	if msg.Status == "" {
-		if msg.Incoming {
-			msg.Status = "received"
-		} else {
-			msg.Status = "pending"
-		}
+		if msg.Incoming { msg.Status = "received" } else { msg.Status = "pending" }
 	}
 
 	conv.Messages = append(conv.Messages, msg)
 	conv.LastActive = time.Now()
 
 	preview := msg.Content
-	if len(preview) > 30 {
-		preview = preview[:27] + "..."
-	}
+	if len(preview) > 30 { preview = preview[:27] + "..." }
 	if msg.Incoming {
 		conv.Unread = true
 		conv.Snippet = preview
@@ -75,14 +81,13 @@ func (m *Manager) SaveMessage(peerID string, msg Message) {
 	m.saveInternal()
 }
 
-func (m *Manager) UpdateMessageStatus(peerID, msgID, status string) {
+func (m *Manager) UpdateMessageStatus(targetID, msgID, status string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	conv, exists := m.Conversations[peerID]
+	conv, exists := m.Conversations[targetID]
 	if !exists { return }
 
-	// Find and update
 	for i, msg := range conv.Messages {
 		if msg.ID == msgID {
 			conv.Messages[i].Status = status
@@ -97,21 +102,21 @@ func (m *Manager) GetPendingMessages() map[string][]Message {
 	defer m.mu.RUnlock()
 
 	pending := make(map[string][]Message)
-	for peerID, conv := range m.Conversations {
+	for id, conv := range m.Conversations {
 		for _, msg := range conv.Messages {
 			if !msg.Incoming && msg.Status == "pending" {
-				pending[peerID] = append(pending[peerID], msg)
+				pending[id] = append(pending[id], msg)
 			}
 		}
 	}
 	return pending
 }
 
-func (m *Manager) GetHistory(peerID string) []Message {
+func (m *Manager) GetHistory(id string) []Message {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	conv, exists := m.Conversations[peerID]
+	conv, exists := m.Conversations[id]
 	if exists {
 		conv.Unread = false
 		m.saveInternal()
@@ -146,7 +151,7 @@ func (m *Manager) loadHistory() {
 	data, err := os.ReadFile(path)
 	if err == nil {
 		json.Unmarshal(data, &m.Conversations)
-		fmt.Printf("📂 Loaded history for %d chats\n", len(m.Conversations))
+		fmt.Printf("📂 Loaded history for %d conversations\n", len(m.Conversations))
 	}
 }
 

@@ -11,11 +11,12 @@ import (
 
 type Peer struct {
 	OnionAddress string    `json:"onion_address"`
-	Nickname     string    `json:"nickname"` // <--- NEW
+	Nickname     string    `json:"nickname"`
 	TrustLevel   string    `json:"trust_level"`
 	LastSeen     time.Time `json:"last_seen"`
 	PublicKey    string    `json:"public_key"`
 	Status       string    `json:"status"`
+	Blocked      bool      `json:"blocked"` // <--- NEW
 }
 
 type PeerManager struct {
@@ -40,6 +41,15 @@ func (pm *PeerManager) HasPeer(onion string) bool {
 	return exists
 }
 
+func (pm *PeerManager) IsBlocked(onion string) bool {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	if p, ok := pm.KnownPeers[onion]; ok {
+		return p.Blocked
+	}
+	return false
+}
+
 func (pm *PeerManager) GetPublicKey(onion string) string {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
@@ -49,7 +59,36 @@ func (pm *PeerManager) GetPublicKey(onion string) string {
 	return ""
 }
 
-// Update AddPeer to accept Nickname
+// --- MANAGEMENT ACTIONS ---
+
+func (pm *PeerManager) RemovePeer(onion string) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	delete(pm.KnownPeers, onion)
+	pm.savePeersInternal()
+	fmt.Printf("🗑️ Removed peer: %s\n", onion)
+}
+
+func (pm *PeerManager) ToggleBlock(onion string) bool {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	p, exists := pm.KnownPeers[onion]
+	if !exists { return false }
+
+	p.Blocked = !p.Blocked
+	pm.KnownPeers[onion] = p
+	pm.savePeersInternal()
+
+	status := "Blocked"
+	if !p.Blocked { status = "Unblocked" }
+	fmt.Printf("🚫 %s peer: %s\n", status, onion)
+
+	return p.Blocked
+}
+
+// --- STANDARD LOGIC ---
+
 func (pm *PeerManager) AddPeer(onion, trust, pubKey, nickname string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -60,18 +99,19 @@ func (pm *PeerManager) AddPeer(onion, trust, pubKey, nickname string) {
 			OnionAddress: onion,
 			TrustLevel:   trust,
 			Status:       "unknown",
+			Blocked:      false,
 		}
+	}
+
+	// If blocked, do not update metadata (shadowban logic)
+	if p.Blocked {
+		return
 	}
 
 	p.LastSeen = time.Now()
 
-	if pubKey != "" {
-		p.PublicKey = pubKey
-	}
-	// Always update nickname if provided
-	if nickname != "" {
-		p.Nickname = nickname
-	}
+	if pubKey != "" { p.PublicKey = pubKey }
+	if nickname != "" { p.Nickname = nickname }
 
 	if p.TrustLevel == "unknown" && trust != "unknown" {
 		p.TrustLevel = trust
@@ -79,10 +119,6 @@ func (pm *PeerManager) AddPeer(onion, trust, pubKey, nickname string) {
 
 	pm.KnownPeers[onion] = p
 	pm.savePeersInternal()
-
-	if !exists || (pubKey != "" && pubKey != p.PublicKey) || (nickname != "" && nickname != p.Nickname) {
-		fmt.Printf("🔭 Peer Updated: %s (%s)\n", onion, p.Nickname)
-	}
 }
 
 func (pm *PeerManager) GetPeers() []Peer {
