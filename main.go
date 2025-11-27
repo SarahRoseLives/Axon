@@ -1,7 +1,7 @@
 package main
 
 import (
-	"axon/discovery" // <--- Import this
+	"axon/discovery"
 	"axon/identity"
 	"axon/tor"
 	"axon/webui"
@@ -24,28 +24,22 @@ func main() {
 
 	os.MkdirAll(dataDir, 0700)
 
-	// 2. Identity
+	// 2. Identity (Load Keys)
+	// We need this Key here to pass it down to Tor via WebUI
 	privKey, err := identity.LoadOrGenerateKey(dataDir, "axon_identity")
 	if err != nil {
 		log.Fatalf("Fatal: Could not load identity: %v", err)
 	}
 
-	// 3. Peer Manager (NEW)
-	// Initialize the list of known friends
+	// 3. Peer Manager
 	peerManager := discovery.NewPeerManager(dataDir)
 
-	// 4. Tor
+	// 4. Tor Controller
+	// We create the controller, but we DO NOT start it here.
+	// We pass it to WebUI, which will start it with the RESTRICTED Handler.
 	torInstance := tor.NewController()
-	go func() {
-		onionAddr, err := torInstance.Start(dataDir, privKey)
-		if err != nil {
-			log.Printf("❌ Tor Setup Failed: %v", err)
-			return
-		}
-		fmt.Printf("\n🧅 ONION SERVICE LIVE: %s.onion\n", onionAddr)
-	}()
+	defer torInstance.Stop()
 
-	// 5. Start Web UI
-	// Pass the peerManager to the UI so it can display them
-	webui.Start(port, torInstance, peerManager)
+	// 5. Start Web UI (and Tor Background Service)
+	webui.Start(port, torInstance, peerManager, privKey)
 }

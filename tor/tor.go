@@ -23,9 +23,9 @@ func NewController() *Controller {
 	return &Controller{Ready: false}
 }
 
-// Start initializes Tor, creates the service, AND starts the HTTP server on it
-func (c *Controller) Start(baseDir string, privKey ed25519.PrivateKey) (string, error) {
-	fmt.Println("≡ƒî▒ Initializing Tor Background Service...")
+// UPDATED: Now accepts 'handler http.Handler' to serve specific routes over Tor
+func (c *Controller) Start(baseDir string, privKey ed25519.PrivateKey, handler http.Handler) (string, error) {
+	fmt.Println("🧅 Initializing Tor Background Service...")
 
 	torDataDir := filepath.Join(baseDir, "tor_sys")
 	if err := os.MkdirAll(torDataDir, 0700); err != nil {
@@ -41,14 +41,12 @@ func (c *Controller) Start(baseDir string, privKey ed25519.PrivateKey) (string, 
 	// WINDOWS FIX: Use Absolute Path
 	// ---------------------------------------------------------
 	if runtime.GOOS == "windows" {
-		// Go blocks running "tor.exe" directly from the current folder for security.
-		// We must resolve it to an Absolute Path (e.g. C:\Users\...\tor.exe)
 		if _, err := os.Stat("tor.exe"); err == nil {
 			absPath, _ := filepath.Abs("tor.exe")
-			fmt.Printf("≡ƒöº Windows detected: Using local binary at %s\n", absPath)
+			fmt.Printf("🪟 Windows detected: Using local binary at %s\n", absPath)
 			conf.ExePath = absPath
 		} else {
-			fmt.Println("ΓÜá´©Å Warning: tor.exe not found in directory. Assuming it is in %PATH%...")
+			fmt.Println("⚠️ Warning: tor.exe not found in directory. Assuming it is in %PATH%...")
 		}
 	}
 
@@ -62,7 +60,7 @@ func (c *Controller) Start(baseDir string, privKey ed25519.PrivateKey) (string, 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
-	fmt.Println("ΓÅ│ Establishing Circuit (this may take 30s)...")
+	fmt.Println("⏳ Establishing Circuit (this may take 30s)...")
 	onion, err := t.Listen(ctx, &tor.ListenConf{
 		Version3:    true,
 		RemotePorts: []int{80},
@@ -76,8 +74,9 @@ func (c *Controller) Start(baseDir string, privKey ed25519.PrivateKey) (string, 
 	c.Onion = onion
 	c.Ready = true
 
-	// Bind the HTTP Server to the Tor Listener
-	go http.Serve(onion, nil)
+	// SECURITY FIX: Bind the restricted handler (Public Mux) to the Tor Listener
+	// Do NOT use 'nil' here, or it will use DefaultServeMux (the Admin UI)
+	go http.Serve(onion, handler)
 
 	return onion.ID, nil
 }
