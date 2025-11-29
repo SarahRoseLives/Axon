@@ -1,6 +1,7 @@
 {{ define "scripts" }}
 <script>
-// ... (Keep Icons and Utils the same) ...
+console.log("AXON: Loading Scripts...");
+
 const ICONS = {
     'network': '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>',
     'zap': '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>',
@@ -28,10 +29,11 @@ const Utils = {
         return (Math.abs(hash) % 360) * (Math.PI / 180);
     },
     getStatusColor(peer) {
+        return this.getStatusLabel(peer) === 'online' ? 'var(--success)' : 'var(--text-dim)';
+    },
+    getStatusLabel(peer) {
         const diff = (new Date() - new Date(peer.last_seen)) / 1000;
-        if (diff < 300) return 'var(--success)';
-        if (diff < 3600) return 'var(--warning)';
-        return 'var(--text-dim)';
+        return diff < 300 ? 'online' : 'offline'; // 5 min timeout
     },
     timeAgo(dateStr) {
         const diff = Math.floor((new Date() - new Date(dateStr)) / 1000);
@@ -42,41 +44,133 @@ const Utils = {
     }
 };
 
-// ... (Keep App, Graph, Network, Chat, Feed, UI same as before) ...
+// --- PHYSICS GRAPH ENGINE ---
+const Graph = {
+    nodes: [], links: [], transform: { x: 0, y: 0, k: 1 }, width: 0, height: 0, dragging: false, lastX: 0, lastY: 0,
 
-// --- UPDATE FILES MODULE ONLY ---
-const App = {
-    // ... (Peers, selfAddress, activePeer, init, poll same as before) ...
-    peers: [], selfAddress: "", activePeer: null,
     init() {
-        Graph.init(); this.UI.switchTab('network'); setInterval(() => this.poll(), 2000); this.poll();
+        const c = document.getElementById('topology-container');
+        if(!c) return;
+        this.updateSize(); this.transform.x=this.width/2; this.transform.y=this.height/2;
+        new ResizeObserver(()=>{this.updateSize()}).observe(c);
+        c.addEventListener('mousedown',e=>{this.dragging=true;this.lastX=e.clientX;this.lastY=e.clientY;c.style.cursor='grabbing'});
+        window.addEventListener('mouseup',()=>{this.dragging=false;if(c)c.style.cursor='default'});
+        c.addEventListener('mousemove',e=>{if(this.dragging){this.transform.x+=e.clientX-this.lastX;this.transform.y+=e.clientY-this.lastY;this.lastX=e.clientX;this.lastY=e.clientY;this.render()}});
+        c.addEventListener('wheel',e=>{e.preventDefault();this.transform.k=Math.min(Math.max(0.2,this.transform.k*(1-e.deltaY*0.001)),4);this.render()});
+        requestAnimationFrame(()=>this.tick());
     },
+    updateSize(){ const c=document.getElementById('topology-container'); if(c){this.width=c.clientWidth;this.height=c.clientHeight;}},
+    updateData(peers) {
+        const nn=[], nl=[], map={};
+        let me=this.nodes.find(n=>n.id==='ME'); if(!me) me={id:'ME',x:0,y:0,vx:0,vy:0,fixed:true};
+        nn.push(me); map['ME']=me;
+        peers.forEach(p=>{
+            let n=this.nodes.find(x=>x.id===p.onion_address);
+            if(!n) n={id:p.onion_address,x:Math.random(),y:Math.random(),vx:0,vy:0,data:p}; else n.data=p;
+            nn.push(n); map[p.onion_address]=n;
+        });
+        peers.forEach(p=>{
+            let tid=p.introduced_by||'ME'; if(!map[tid]) tid='ME';
+            if(map[tid]) nl.push({source:map[p.onion_address],target:map[tid],isOrphan:tid==='ME'&&p.introduced_by!==''});
+        });
+        this.nodes=nn; this.links=nl;
+    },
+    tick() {
+        const REP=800, LEN=100, K=0.04, FRIC=0.92, GRAV=0.005;
+        for(let i=0;i<this.nodes.length;i++){
+            let a=this.nodes[i]; if(a.fixed) continue;
+            for(let j=0;j<this.nodes.length;j++){
+                if(i===j) continue; let b=this.nodes[j], dx=a.x-b.x, dy=a.y-b.y, d=Math.sqrt(dx*dx+dy*dy)||1;
+                let f=REP/(d*d); a.vx+=dx/d*f; a.vy+=dy/d*f;
+            }
+            a.vx-=a.x*GRAV; a.vy-=a.y*GRAV;
+        }
+        this.links.forEach(l=>{
+            let a=l.source, b=l.target, dx=a.x-b.x, dy=a.y-b.y, d=Math.sqrt(dx*dx+dy*dy)||1;
+            let f=(d-LEN)*K; if(!a.fixed){a.vx-=dx/d*f; a.vy-=dy/d*f;} if(!b.fixed){b.vx+=dx/d*f; b.vy+=dy/d*f;}
+        });
+        this.nodes.forEach(n=>{if(!n.fixed){n.vx*=FRIC;n.vy*=FRIC;n.x+=n.vx;n.y+=n.vy}});
+        this.render();
+        requestAnimationFrame(()=>this.tick());
+    },
+    render() {
+        const div=document.getElementById('topology-nodes'), svg=document.getElementById('topology-svg');
+        if(!div||!svg) return;
+        const {x:tx,y:ty,k:s}=this.transform;
+        let lH='', nH='';
+        this.links.forEach(l=>{
+            let x1=l.source.x*s+tx, y1=l.source.y*s+ty, x2=l.target.x*s+tx, y2=l.target.y*s+ty;
+            let col = l.isOrphan ? 'var(--text-dim)' : (l.source.data.introduced_by ? 'var(--warning)' : 'var(--primary)');
+            let dash = l.source.data.introduced_by ? 'stroke-dasharray="4,4"' : '';
+            lH+=`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${col}" stroke-width="1" stroke-opacity="0.4" ${dash}/>`;
+        });
+        this.nodes.forEach(n=>{
+            let px=n.x*s+tx, py=n.y*s+ty;
+            if(n.fixed) nH+=`<div style="position:absolute;left:${px}px;top:${py}px;transform:translate(-50%,-50%);width:60px;height:60px;background:var(--bg-panel);border:2px solid var(--primary);border-radius:50%;display:flex;justify-content:center;align-items:center;z-index:10;box-shadow:0 0 20px rgba(6,182,212,0.2);">${Utils.icon('user','width:30px;color:var(--primary)')}</div><div style="position:absolute;left:${px}px;top:${py+40}px;transform:translateX(-50%);color:var(--primary);font-size:10px;font-weight:bold;background:rgba(0,0,0,0.8);padding:2px 4px;border-radius:4px;">YOU</div>`;
+            else {
+                let stat=Utils.getStatusColor(n.data), isDir=!n.data.introduced_by, sz=isDir?40:32, ic=isDir?'zap':'shield';
+                nH+=`<div onclick="App.Chat.open('${n.id}','${n.data.nickname}')" title="${n.id}" style="cursor:pointer;position:absolute;left:${px}px;top:${py}px;transform:translate(-50%,-50%);width:${sz}px;height:${sz}px;background:var(--bg-panel);border:2px solid ${stat};border-radius:50%;display:flex;justify-content:center;align-items:center;z-index:10;box-shadow:0 0 10px ${stat}40;color:${stat}">${Utils.icon(ic)}</div><div style="position:absolute;left:${px}px;top:${py+sz/2+5}px;transform:translateX(-50%);color:var(--text-dim);font-size:9px;background:rgba(0,0,0,0.8);padding:2px 4px;border-radius:4px;pointer-events:none;white-space:nowrap;z-index:11;">${n.data.nickname||'Peer'}</div>`;
+            }
+        });
+        svg.innerHTML=lH; div.innerHTML=nH;
+    }
+};
+
+// --- APP CONTROLLER ---
+const App = {
+    peers: [], selfAddress: "", activePeer: null,
+
+    init() {
+        console.log("AXON: App Init");
+        Graph.init();
+        this.UI.switchTab('network');
+        setInterval(() => this.poll(), 2000);
+        this.poll();
+    },
+
     async poll() {
         try {
             const res = await fetch('/api/peers');
             const data = await res.json();
+
             let rawPeers = data.peers || [];
             rawPeers.sort((a, b) => a.onion_address.localeCompare(b.onion_address));
             this.peers = rawPeers;
             this.selfAddress = data.self || "";
-            Graph.updateData(this.peers);
-            if (this.UI.currentTab === 'network') this.Network.renderList(this.peers);
+
+            // 1. UPDATE HUD FIRST (Guaranteed Update)
             const elAll = document.getElementById('hud-node-count-all');
+            const elOnline = document.getElementById('hud-node-count-online');
             if(elAll) elAll.innerText = this.peers.length + 1;
-        } catch(e) {}
+
+            let online = 1; // Count self
+            this.peers.forEach(p => {
+                if(Utils.getStatusLabel(p) === 'online') online++;
+            });
+            if(elOnline) elOnline.innerText = online;
+
+            // 2. Update Visualizations
+            Graph.updateData(this.peers);
+            if (this.UI.currentTab === 'network') {
+                this.Network.renderList(this.peers);
+            }
+
+        } catch(e) { console.error("Peer Poll Error", e); }
 
         try {
-            if (this.UI.currentTab === 'chat') {
-                const res = await fetch('/api/chat/status');
-                const data = await res.json();
-                this.Chat.renderSidebar(this.peers, data || []);
-                if (this.activePeer) this.Chat.pollMessages();
-            }
+             // Poll Chat Status (Badge)
              const res = await fetch('/api/chat/status');
              const chatData = await res.json() || [];
+
+             // Update Badge
              let unreadTotal = 0;
              chatData.forEach(c => { if(c.unread) unreadTotal++; });
              this.UI.updateBadge(unreadTotal);
+
+             if (this.UI.currentTab === 'chat') {
+                this.Chat.renderSidebar(this.peers, chatData);
+                if (this.activePeer) this.Chat.pollMessages();
+            }
         } catch(e) {}
 
         if(this.UI.currentTab === 'feed') this.Feed.poll();
@@ -84,28 +178,49 @@ const App = {
     },
 
     Network: {
-         renderList(peers) {
+        renderList(peers) {
             const el = document.getElementById('peer-list-container');
             if(!el) return;
             if(peers.length === 0) {
                 el.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-dim);">No peers yet.</div>';
                 return;
             }
-            const sortedForList = [...peers].sort((a,b) => a.onion_address.localeCompare(b.onion_address));
-            el.innerHTML = sortedForList.map(p => `
+            const sortedForList = [...peers].sort((a,b) => {
+                const typeA = a.introduced_by ? 1 : 0;
+                const typeB = b.introduced_by ? 1 : 0;
+                if (typeA !== typeB) return typeA - typeB;
+                return a.onion_address.localeCompare(b.onion_address);
+            });
+
+            el.innerHTML = sortedForList.map(p => {
+                const color = Utils.getStatusColor(p);
+                const isDirect = !p.introduced_by;
+                const label = p.nickname || p.onion_address.substring(0,12)+'...';
+
+                return `
                 <div onclick="App.Chat.open('${p.onion_address}', '${p.nickname}')" style="padding: 10px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; cursor: pointer;">
-                    <div><div style="color: var(--text-bright); font-family: monospace;">${p.nickname || p.onion_address.substring(0,12)+'...'}</div><div style="color: var(--text-dim); font-size: 10px;">${p.onion_address}</div></div>
-                    <div style="width:8px; height:8px; border-radius:50%; background-color: ${Utils.getStatusColor(p)};"></div>
-                </div>`).join('');
+                    <div>
+                        <div style="color: var(--text-bright); font-family: monospace; font-size: 13px;">
+                            ${label}
+                            ${!isDirect ? '<span style="color:var(--warning); font-size:9px; margin-left:5px;">(INDIRECT)</span>' : ''}
+                        </div>
+                        <div style="color: var(--text-dim); font-size: 10px;">${p.onion_address}</div>
+                    </div>
+                    <div style="display:flex; gap:10px; align-items:center;">
+                        <div style="width:8px; height:8px; border-radius:50%; background-color: ${color}; box-shadow: 0 0 5px ${color};"></div>
+                    </div>
+                </div>`;
+            }).join('');
         }
     },
 
     Chat: {
-         renderSidebar(peers, stats) {
+        renderSidebar(peers, stats) {
             const el = document.getElementById('chat-peer-list');
             if(!el) return;
             const map = {};
             stats.forEach(s => map[s.peer_id] = s);
+
             el.innerHTML = peers.map(p => {
                 const s = map[p.onion_address] || {};
                 const active = App.activePeer === p.onion_address ? 'background: var(--bg-card);' : '';
@@ -129,10 +244,17 @@ const App = {
                 const res = await fetch(`/api/chat/history?peer=${encodeURIComponent(App.activePeer)}`);
                 const msgs = await res.json();
                 const el = document.getElementById('chat-messages');
-                el.innerHTML = msgs.map(m => `<div style="display:flex; flex-direction:column; ${m.incoming ? 'align-items:flex-start' : 'align-items:flex-end'}; max-width: 100%;">
-                        <div style="${m.incoming ? 'align-self: flex-start; background: var(--bg-card);' : 'align-self: flex-end; background: var(--primary); color: white;'} padding: 8px 12px; border-radius: 6px; max-width: 70%; font-size: 13px; border: 1px solid var(--border);">${m.content}</div>
-                        <div style="font-size: 9px; color: var(--text-dim); margin-top: 2px;">${new Date(m.timestamp).toLocaleTimeString()}</div>
-                    </div>`).join('');
+                el.innerHTML = msgs.map(m => {
+                     const align = m.incoming ? 'align-self: flex-start; background: var(--bg-card);' : 'align-self: flex-end; background: var(--primary); color: white;';
+                     let statusIcon = '';
+                     if (!m.incoming) {
+                        if (m.status === 'sent') statusIcon = Utils.icon('check', 'color: var(--text-bright); width:12px; height:12px; margin-left:5px;');
+                        else if (m.status === 'pending') statusIcon = Utils.icon('loader', 'color: var(--text-dim); width:12px; height:12px; margin-left:5px;');
+                     }
+                     return `<div style="display:flex; flex-direction:column; ${m.incoming ? 'align-items:flex-start' : 'align-items:flex-end'}; max-width: 100%;">
+                        <div style="${align} padding: 8px 12px; border-radius: 6px; max-width: 70%; font-size: 13px; border: 1px solid var(--border);">${m.content}</div>
+                        <div style="font-size: 9px; color: var(--text-dim); margin-top: 2px; display:flex; align-items:center;">${new Date(m.timestamp).toLocaleTimeString()}${statusIcon}</div></div>`;
+                }).join('');
             } catch(e) {}
         },
         async send(e) {
@@ -161,29 +283,19 @@ const App = {
             if(e && e.key !== 'Enter') return;
             const q = document.getElementById('file-search-input').value;
             if(!q) return;
-
             try {
                 const res = await fetch(`/api/files/search?q=${encodeURIComponent(q)}`);
                 const files = await res.json();
                 const el = document.getElementById('file-results');
-
                 el.innerHTML = files && files.length ? files.map(f => `
                 <div style="background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 15px; display: flex; flex-direction: column; justify-content: space-between; height: 100%;">
-                    <div style="margin-bottom: 10px;">
-                        <div style="color: var(--text-bright); font-weight: bold; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${f.name}">${f.name}</div>
-                        <div style="color: var(--text-dim); font-size: 11px; margin-top: 4px;">SIZE: ${(f.size/1024/1024).toFixed(2)} MB</div>
-                        <div style="color: var(--primary); font-size: 11px; font-family: monospace;">OWNER: ${f.owner.substring(0,8)}...</div>
-                    </div>
-                    <button onclick="App.Files.download('${f.owner}', '${f.id}', '${f.name}', ${f.size})"
-                        style="width: 100%; background: transparent; border: 1px solid var(--primary); color: var(--primary); padding: 8px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 5px;">
-                        ${Utils.icon('download')} Download
-                    </button>
+                    <div style="margin-bottom: 10px;"><div style="color: var(--text-bright); font-weight: bold; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${f.name}">${f.name}</div><div style="color: var(--text-dim); font-size: 11px; margin-top: 4px;">SIZE: ${(f.size/1024/1024).toFixed(2)} MB</div><div style="color: var(--primary); font-size: 11px; font-family: monospace;">OWNER: ${f.owner.substring(0,8)}...</div></div>
+                    <button onclick="App.Files.download('${f.owner}', '${f.id}', '${f.name}', ${f.size}')" style="width: 100%; background: transparent; border: 1px solid var(--primary); color: var(--primary); padding: 8px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 5px;">${Utils.icon('download')} Download</button>
                 </div>`).join('') : `<div style="grid-column: 1 / -1; text-align: center; color: var(--text-dim); margin-top: 40px;">No files found.</div>`;
             } catch(e) {}
         },
         async download(peer, id, name, size) {
             if(!confirm(`Download ${name}?`)) return;
-            // Added alert for immediate feedback
             alert("Download Queued. Check the Transfer list.");
             await fetch('/api/files/download', {method:'POST', body:JSON.stringify({peer_id:peer, file_id:id, file_name:name, size:size})});
             this.poll();
@@ -195,15 +307,13 @@ const App = {
     },
 
     Feed: {
-         async poll() {
+        async poll() {
             try {
                 const res = await fetch('/api/feed/history');
                 const msgs = await res.json();
                 const el = document.getElementById('feed-messages');
                 if(el) {
-                    el.innerHTML = msgs.map(m => `<div style="background: var(--bg-card); padding: 15px; border-radius: 6px; border: 1px solid var(--border); margin-bottom:10px;">
-                        <div style="display:flex; justify-content:space-between; margin-bottom:5px;"><span style="color: var(--primary); font-size: 11px; font-weight:bold;">${m.from.substring(0,16)}...</span><span style="color: var(--text-dim); font-size: 10px;">${new Date(m.timestamp).toLocaleTimeString()}</span></div>
-                        <div style="color: var(--text-bright); font-size: 14px; line-height: 1.4;">${m.content}</div></div>`).join('');
+                    el.innerHTML = msgs.map(m => `<div style="background: var(--bg-card); padding: 15px; border-radius: 6px; border: 1px solid var(--border); margin-bottom:10px;"><div style="display:flex; justify-content:space-between; margin-bottom:5px;"><span style="color: var(--primary); font-size: 11px; font-weight:bold;">${m.from.substring(0,16)}...</span><span style="color: var(--text-dim); font-size: 10px;">${new Date(m.timestamp).toLocaleTimeString()}</span></div><div style="color: var(--text-bright); font-size: 14px; line-height: 1.4;">${m.content}</div></div>`).join('');
                 }
             } catch(e) {}
         },
@@ -224,6 +334,10 @@ const App = {
             document.querySelectorAll('.view-section').forEach(v => v.classList.toggle('hidden', v.id !== `view-${id}`));
             App.poll();
         },
+        updateBadge(count) {
+            const el = document.getElementById('nav-chat-badge');
+            if(el) { if(count > 0) el.classList.remove('hidden'); else el.classList.add('hidden'); }
+        },
         async addPeer() {
             const onion = prompt("Peer Onion Address:");
             if(onion) await fetch('/api/peers/add', {method:'POST', body:JSON.stringify({onion_address:onion})});
@@ -242,90 +356,7 @@ const App = {
             if(!App.activePeer || !confirm('Delete peer?')) return;
             await fetch('/api/peers/delete', {method:'POST', body:JSON.stringify({onion_address:App.activePeer})});
             window.location.reload();
-        },
-        updateBadge(count) {
-            const el = document.getElementById('nav-chat-badge');
-            if(el) { if(count > 0) el.classList.remove('hidden'); else el.classList.add('hidden'); }
         }
-    }
-};
-
-// PHYSICS GRAPH (Paste same Graph Logic here)
-// I'm omitting the Graph object for brevity as it was correct in previous step,
-// but ensure it's included here before the try/catch block!
-const Graph = {
-    nodes: [], links: [], transform: {x:0,y:0,k:1}, width:0, height:0, dragging:false, lastX:0, lastY:0,
-    init() {
-        const c = document.getElementById('topology-container');
-        if(!c) return;
-        this.updateSize(); this.transform.x=this.width/2; this.transform.y=this.height/2;
-        new ResizeObserver(()=>{this.updateSize()}).observe(c);
-        c.addEventListener('mousedown',e=>{this.dragging=true;this.lastX=e.clientX;this.lastY=e.clientY;c.style.cursor='grabbing'});
-        window.addEventListener('mouseup',()=>{this.dragging=false;if(c)c.style.cursor='default'});
-        c.addEventListener('mousemove',e=>{if(this.dragging){this.transform.x+=e.clientX-this.lastX;this.transform.y+=e.clientY-this.lastY;this.lastX=e.clientX;this.lastY=e.clientY;this.render()}});
-        c.addEventListener('wheel',e=>{e.preventDefault();this.transform.k=Math.min(Math.max(0.2,this.transform.k*(1-e.deltaY*0.001)),4);this.render()});
-        requestAnimationFrame(()=>this.tick());
-    },
-    updateSize(){ const c=document.getElementById('topology-container'); if(c){this.width=c.clientWidth;this.height=c.clientHeight;}},
-    updateData(peers) {
-        const nn=[], nl=[], map={};
-        let me=this.nodes.find(n=>n.id==='ME');
-        if(!me) me={id:'ME',x:0,y:0,vx:0,vy:0,fixed:true};
-        nn.push(me); map['ME']=me;
-        peers.forEach(p=>{
-            let n=this.nodes.find(x=>x.id===p.onion_address);
-            if(!n) n={id:p.onion_address,x:Math.random(),y:Math.random(),vx:0,vy:0,data:p};
-            else n.data=p;
-            nn.push(n); map[p.onion_address]=n;
-        });
-        peers.forEach(p=>{
-            let tid=p.introduced_by||'ME';
-            if(!map[tid]) tid='ME';
-            if(map[tid]) nl.push({source:map[p.onion_address],target:map[tid],isOrphan:tid==='ME'&&p.introduced_by!==''});
-        });
-        this.nodes=nn; this.links=nl;
-    },
-    tick() {
-        const REP=800, LEN=100, K=0.04, FRIC=0.92, GRAV=0.005;
-        for(let i=0;i<this.nodes.length;i++){
-            let a=this.nodes[i]; if(a.fixed) continue;
-            for(let j=0;j<this.nodes.length;j++){
-                if(i===j) continue;
-                let b=this.nodes[j], dx=a.x-b.x, dy=a.y-b.y, d=Math.sqrt(dx*dx+dy*dy)||1;
-                let f=REP/(d*d); a.vx+=dx/d*f; a.vy+=dy/d*f;
-            }
-            a.vx-=a.x*GRAV; a.vy-=a.y*GRAV;
-        }
-        this.links.forEach(l=>{
-            let a=l.source, b=l.target, dx=a.x-b.x, dy=a.y-b.y, d=Math.sqrt(dx*dx+dy*dy)||1;
-            let f=(d-LEN)*K;
-            if(!a.fixed){a.vx-=dx/d*f; a.vy-=dy/d*f;}
-            if(!b.fixed){b.vx+=dx/d*f; b.vy+=dy/d*f;}
-        });
-        this.nodes.forEach(n=>{if(!n.fixed){n.vx*=FRIC;n.vy*=FRIC;n.x+=n.vx;n.y+=n.vy}});
-        this.render();
-        requestAnimationFrame(()=>this.tick());
-    },
-    render() {
-        const div=document.getElementById('topology-nodes'), svg=document.getElementById('topology-svg');
-        if(!div||!svg) return;
-        const {x:tx,y:ty,k:s}=this.transform;
-        let lH='', nH='';
-        this.links.forEach(l=>{
-            let x1=l.source.x*s+tx, y1=l.source.y*s+ty, x2=l.target.x*s+tx, y2=l.target.y*s+ty;
-            let col = l.isOrphan ? 'var(--text-dim)' : (l.source.data.introduced_by ? 'var(--warning)' : 'var(--primary)');
-            let dash = l.source.data.introduced_by ? 'stroke-dasharray="4,4"' : '';
-            lH+=`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${col}" stroke-width="1" stroke-opacity="0.4" ${dash}/>`;
-        });
-        this.nodes.forEach(n=>{
-            let px=n.x*s+tx, py=n.y*s+ty;
-            if(n.fixed) nH+=`<div style="position:absolute;left:${px}px;top:${py}px;transform:translate(-50%,-50%);width:60px;height:60px;background:var(--bg-panel);border:2px solid var(--primary);border-radius:50%;display:flex;justify-content:center;align-items:center;z-index:10;box-shadow:0 0 20px rgba(6,182,212,0.2);">${Utils.icon('user','width:30px;color:var(--primary)')}</div><div style="position:absolute;left:${px}px;top:${py+40}px;transform:translateX(-50%);color:var(--primary);font-size:10px;font-weight:bold;background:rgba(0,0,0,0.8);padding:2px 4px;border-radius:4px;">YOU</div>`;
-            else {
-                let stat=Utils.getStatusColor(n.data), isDir=!n.data.introduced_by, sz=isDir?40:32, ic=isDir?'zap':'shield';
-                nH+=`<div onclick="App.Chat.open('${n.id}','${n.data.nickname}')" title="${n.id}" style="cursor:pointer;position:absolute;left:${px}px;top:${py}px;transform:translate(-50%,-50%);width:${sz}px;height:${sz}px;background:var(--bg-panel);border:2px solid ${stat};border-radius:50%;display:flex;justify-content:center;align-items:center;z-index:10;box-shadow:0 0 10px ${stat}40;color:${stat}">${Utils.icon(ic)}</div><div style="position:absolute;left:${px}px;top:${py+sz/2+5}px;transform:translateX(-50%);color:var(--text-dim);font-size:9px;background:rgba(0,0,0,0.8);padding:2px 4px;border-radius:4px;pointer-events:none;white-space:nowrap;z-index:11;">${n.data.nickname||'Peer'}</div>`;
-            }
-        });
-        svg.innerHTML=lH; div.innerHTML=nH;
     }
 };
 
