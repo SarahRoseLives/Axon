@@ -1,29 +1,28 @@
 {{ template "base" . }}
 
 {{ define "content" }}
-	{{ template "sidebar" . }}
+    {{ template "sidebar" . }}
 
-	<div class="flex-1 flex flex-col min-w-0">
-		<header class="h-16 border-b border-slate-800 bg-slate-950/50 backdrop-blur flex items-center justify-between px-6">
-			<div>
-				<h2 id="header-title" class="text-lg font-medium text-slate-100">Network Topology</h2>
-				<p class="text-xs text-slate-500 font-mono flex items-center gap-2">
-					<span id="self-onion-address">{{ .OnionAddr }}</span>
-				</p>
-			</div>
+    <div class="flex-1 flex flex-col min-w-0">
+        <header class="h-16 border-b border-slate-800 bg-slate-950/50 backdrop-blur flex items-center justify-between px-6">
+            <div>
+                <h2 id="header-title" class="text-lg font-medium text-slate-100">Network Topology</h2>
+                <p class="text-xs text-slate-500 font-mono flex items-center gap-2">
+                    <span id="self-onion-address">{{ .OnionAddr }}</span>
+                </p>
+            </div>
+            <div class="flex items-center gap-4">
+                <button onclick="promptAddPeer()" class="p-2 text-slate-400 hover:text-cyan-400 transition-colors" title="Add Peer">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" class="icon w-5 h-5"><path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="8.5" cy="7" r="4"></circle><line x1="20" y1="8" x2="20" y2="14"></line><line x1="23" y1="11" x2="17" y2="11"></line></svg>
+                </button>
+            </div>
+        </header>
 
-			<div class="flex items-center gap-4">
-				<button onclick="promptAddPeer()" class="p-2 text-slate-400 hover:text-cyan-400 transition-colors" title="Add Peer">
-					<i data-lucide="user-plus" class="w-5 h-5"></i>
-				</button>
-			</div>
-		</header>
-
-		<main class="flex-1 relative overflow-hidden bg-slate-950">
-			{{ template "view_network" . }}
-			{{ template "view_feed" . }}
-			{{ template "view_chat" . }}
-			{{ template "view_identity" . }}
-		</main>
-	</div>
+        <main class="flex-1 relative overflow-hidden bg-slate-950">
+            {{ template "view_network" . }}
+            {{ template "view_feed" . }}
+            {{ template "view_chat" . }}
+            {{ template "view_files" . }} {{ template "view_identity" . }}
+        </main>
+    </div>
 {{ end }}

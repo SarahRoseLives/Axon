@@ -1,348 +1,378 @@
 package webui
 
 import (
-	"axon/chat"
-	"axon/discovery"
-	"axon/identity"
-	"axon/tor"
-	"crypto/ed25519"
-	"encoding/json"
-	"fmt"
-	"html/template"
-	"log"
-	"net/http"
-	"time"
+    "axon/chat"
+    "axon/discovery"
+    "axon/files"
+    "axon/identity"
+    "axon/tor"
+    "crypto/ed25519"
+    "encoding/json"
+    "fmt"
+    "html/template"
+    "log"
+    "net/http"
+    "strconv"
+    "time"
 )
 
 type UIContext struct {
-	AppVersion    string
-	OnionAddr     string
-	MyOnionAddr   string
-	Status        string
-	Peers         []discovery.Peer
-	Nickname      string
+    AppVersion   string
+    OnionAddr    string
+    MyOnionAddr  string
+    Status       string
+    Peers        []discovery.Peer
+    Nickname     string
+    SharedCount  int
 }
 
-// UPDATED: Now accepts privKey to start Tor internally with the correct restricted handler
+// Start initializes the Web Server and Tor
 func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager, identityKey ed25519.PrivateKey) {
-	dataDir := fmt.Sprintf("data_%d", port)
+    dataDir := fmt.Sprintf("data_%d", port)
 
-	chatMgr, err := chat.NewManager(dataDir)
-	if err != nil {
-		log.Fatalf("Failed to init chat manager: %v", err)
-	}
+    chatMgr, err := chat.NewManager(dataDir)
+    if err != nil {
+        log.Fatalf("Failed to init chat manager: %v", err)
+    }
 
-	profileMgr := identity.NewProfileManager(dataDir)
-	getNick := func() string { return profileMgr.GetNickname() }
+    profileMgr := identity.NewProfileManager(dataDir)
+    fileMgr := files.NewManager(dataDir)
 
-	// Start background workers
-	StartBackgroundTasks(torCtrl, pm, chatMgr.GetMyPublicKey(), getNick)
-	StartOutboxLoop(torCtrl, pm, chatMgr, getNick)
+    getNick := func() string { return profileMgr.GetNickname() }
 
-	// =========================================================================
-	// 🔒 SECURITY ARCHITECTURE: SPLIT MUX
-	// =========================================================================
+    // Start background workers
+    StartBackgroundTasks(torCtrl, pm, chatMgr.GetMyPublicKey(), getNick)
+    StartOutboxLoop(torCtrl, pm, chatMgr, fileMgr, getNick)
 
-	// 1. PUBLIC MUX (Served over Tor)
-	// This router ONLY exposes endpoints required for peer-to-peer communication.
-	// It does NOT expose the UI or Admin APIs.
-	publicMux := http.NewServeMux()
+    // =========================================================================
+    // 1. PUBLIC MUX (Served over Tor)
+    // =========================================================================
+    // This router ONLY exposes endpoints required for peer-to-peer communication.
+    publicMux := http.NewServeMux()
 
-	// -- Public: Handshake --
-	publicMux.HandleFunc("/api/peers/announce", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			return
-		}
-		var req HandshakeRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			return
-		}
-		from := Sanitize(req.OnionAddress)
-		if from == "" {
-			return
-		}
+    // -- Public: Handshake --
+    publicMux.HandleFunc("/api/peers/announce", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost { return }
+        var req HandshakeRequest
+        if err := json.NewDecoder(r.Body).Decode(&req); err != nil { return }
+        from := Sanitize(req.OnionAddress)
+        if from == "" { return }
 
-		if pm.IsBlocked(from) {
-			http.Error(w, "Blocked", 403)
-			return
-		}
+        if pm.IsBlocked(from) {
+            http.Error(w, "Blocked", 403)
+            return
+        }
 
-		fmt.Printf("👋 Handshake from %s (%s)\n", from, req.Nickname)
-		pm.AddPeer(from, "neighbor", req.PublicKey, req.Nickname, "")
+        fmt.Printf("👋 Handshake from %s (%s)\n", from, req.Nickname)
+        pm.AddPeer(from, "neighbor", req.PublicKey, req.Nickname, "")
 
-		knownPeers := pm.GetPeers()
-		var peerList []string
-		for _, p := range knownPeers {
-			peerList = append(peerList, p.OnionAddress)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(PeerListResponse{
-			Peers:     peerList,
-			PublicKey: chatMgr.GetMyPublicKey(),
-			Nickname:  profileMgr.GetNickname(),
-		})
-	})
+        knownPeers := pm.GetPeers()
+        var peerList []string
+        for _, p := range knownPeers {
+            peerList = append(peerList, p.OnionAddress)
+        }
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(PeerListResponse{
+            Peers:     peerList,
+            PublicKey: chatMgr.GetMyPublicKey(),
+            Nickname:  profileMgr.GetNickname(),
+        })
+    })
 
-	// -- Public: Chat Receiver --
-	publicMux.HandleFunc("/api/chat/recv", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			return
-		}
-		var wireMsg chat.WireMessage
-		if err := json.NewDecoder(r.Body).Decode(&wireMsg); err != nil {
-			return
-		}
-		from := Sanitize(wireMsg.From)
-		if pm.IsBlocked(from) {
-			return
-		}
+    // -- Public: Chat Receiver --
+    publicMux.HandleFunc("/api/chat/recv", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost { return }
+        var wireMsg chat.WireMessage
+        if err := json.NewDecoder(r.Body).Decode(&wireMsg); err != nil { return }
 
-		peerKeyHex := pm.GetPublicKey(from)
-		if peerKeyHex == "" {
-			go PerformHandshake(torCtrl, pm, from, chatMgr.GetMyPublicKey(), profileMgr.GetNickname())
-			return
-		}
+        from := Sanitize(wireMsg.From)
+        if pm.IsBlocked(from) { return }
 
-		plaintext, err := chatMgr.Decrypt(peerKeyHex, wireMsg.Ciphertext, wireMsg.Nonce)
-		if err != nil {
-			return
-		}
+        peerKeyHex := pm.GetPublicKey(from)
+        if peerKeyHex == "" {
+            go PerformHandshake(torCtrl, pm, from, chatMgr.GetMyPublicKey(), profileMgr.GetNickname())
+            return
+        }
 
-		msgID := fmt.Sprintf("%d-%d", time.Now().UnixNano(), time.Now().Unix())
-		msg := chat.Message{
-			ID:        msgID,
-			From:      from,
-			To:        "me",
-			Content:   plaintext,
-			Timestamp: time.Now(),
-			Incoming:  true,
-			Status:    "received",
-		}
-		chatMgr.SaveMessage(from, msg)
-		w.Write([]byte(`{"status":"received"}`))
-	})
+        plaintext, err := chatMgr.Decrypt(peerKeyHex, wireMsg.Ciphertext, wireMsg.Nonce)
+        if err != nil { return }
 
-	// -- Public: Feed Receiver --
-	publicMux.HandleFunc("/api/feed/recv", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			return
-		}
-		var wireMsg chat.WireFeedMessage
-		if err := json.NewDecoder(r.Body).Decode(&wireMsg); err != nil {
-			return
-		}
-		from := Sanitize(wireMsg.From)
-		if pm.IsBlocked(from) {
-			return
-		}
+        msgID := fmt.Sprintf("%d-%d", time.Now().UnixNano(), time.Now().Unix())
+        msg := chat.Message{
+            ID:        msgID,
+            From:      from,
+            To:        "me",
+            Content:   plaintext,
+            Timestamp: time.Now(),
+            Incoming:  true,
+            Status:    "received",
+        }
+        chatMgr.SaveMessage(from, msg)
+        w.Write([]byte(`{"status":"received"}`))
+    })
 
-		msgID := fmt.Sprintf("%d-%s", time.Now().UnixNano(), wireMsg.Nonce)
-		msg := chat.Message{
-			ID:        msgID,
-			From:      from,
-			To:        "MESH",
-			Content:   wireMsg.Content,
-			Timestamp: time.Now(),
-		}
-		chatMgr.SaveFeedMessage(msg)
-		w.Write([]byte(`{"status":"received"}`))
-	})
+    // -- Public: Feed Receiver --
+    publicMux.HandleFunc("/api/feed/recv", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost { return }
+        var wireMsg chat.WireFeedMessage
+        if err := json.NewDecoder(r.Body).Decode(&wireMsg); err != nil { return }
 
-	// -------------------------------------------------------------------------
-	// 🚀 START TOR WITH PUBLIC MUX
-	// -------------------------------------------------------------------------
-	go func() {
-		onionAddr, err := torCtrl.Start(dataDir, identityKey, publicMux)
-		if err != nil {
-			log.Printf("❌ Tor Setup Failed: %v", err)
-			return
-		}
-		fmt.Printf("\n🧅 ONION SERVICE LIVE: %s.onion (Secured API Only)\n", onionAddr)
-	}()
+        from := Sanitize(wireMsg.From)
+        if pm.IsBlocked(from) { return }
 
-	// =========================================================================
-	// 2. PRIVATE MUX (Served over Localhost)
-	// This router allows FULL ACCESS (UI, Admin, Sending, Deleting).
-	// =========================================================================
-	privateMux := http.NewServeMux()
+        msgID := fmt.Sprintf("%d-%s", time.Now().UnixNano(), wireMsg.Nonce)
+        msg := chat.Message{
+            ID:        msgID,
+            From:      from,
+            To:        "MESH",
+            Content:   wireMsg.Content,
+            Timestamp: time.Now(),
+        }
+        chatMgr.SaveFeedMessage(msg)
+        w.Write([]byte(`{"status":"received"}`))
+    })
 
-	// -- Internal: UI Routes --
-	privateMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		status := "Initializing..."
-		onion := "Loading..."
-		myOnion := ""
-		if torCtrl.Ready && torCtrl.Onion != nil {
-			status = "Online"
-			onion = torCtrl.Onion.ID + ".onion"
-			myOnion = torCtrl.Onion.ID + ".onion"
-		}
-		data := UIContext{
-			AppVersion:  "0.9.15 (Secured)",
-			OnionAddr:   onion,
-			MyOnionAddr: myOnion,
-			Status:      status,
-			Peers:       pm.GetPeers(),
-			Nickname:    profileMgr.GetNickname(),
-		}
+    // -- Public: File Manifest Receiver --
+    publicMux.HandleFunc("/api/file/manifest", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost {
+            http.Error(w, "Method not allowed", 405)
+            return
+        }
 
-		tmpl, _ := template.ParseGlob("webui/templates/*.html")
-		tmpl.ExecuteTemplate(w, "index.html", data)
-	})
+        var list []files.FileMetadata
+        // Added Error Logging
+        if err := json.NewDecoder(r.Body).Decode(&list); err != nil {
+            fmt.Printf("❌ Failed to decode manifest from peer: %v\n", err)
+            http.Error(w, "Invalid JSON", 400)
+            return
+        }
 
-	// -- Internal: Management APIs --
-	privateMux.HandleFunc("/api/peers/delete", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			return
-		}
-		var req struct {
-			OnionAddress string `json:"onion_address"`
-		}
-		json.NewDecoder(r.Body).Decode(&req)
-		if req.OnionAddress != "" {
-			pm.RemovePeer(req.OnionAddress)
-			chatMgr.DeleteConversation(req.OnionAddress)
-		}
-		w.Write([]byte(`{"status":"success"}`))
-	})
+        fmt.Printf("📦 Received manifest of %d files\n", len(list))
+        if len(list) > 0 {
+             fileMgr.ProcessRemoteManifest(list[0].Owner, list)
+        }
+        w.Write([]byte("OK"))
+    })
 
-	privateMux.HandleFunc("/api/peers/block", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			return
-		}
-		var req struct {
-			OnionAddress string `json:"onion_address"`
-		}
-		json.NewDecoder(r.Body).Decode(&req)
-		blocked := false
-		if req.OnionAddress != "" {
-			blocked = pm.ToggleBlock(req.OnionAddress)
-		}
-		json.NewEncoder(w).Encode(map[string]bool{"blocked": blocked})
-	})
+    // -- Public: File Chunk Server --
+    publicMux.HandleFunc("/api/file/chunk", func(w http.ResponseWriter, r *http.Request) {
+        id := r.URL.Query().Get("id")
+        idxStr := r.URL.Query().Get("idx")
+        idx, _ := strconv.Atoi(idxStr)
 
-	privateMux.HandleFunc("/api/identity", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			var req struct {
-				Nickname string `json:"nickname"`
-			}
-			json.NewDecoder(r.Body).Decode(&req)
-			if req.Nickname != "" {
-				profileMgr.SetNickname(req.Nickname)
-			}
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"nickname": profileMgr.GetNickname()})
-	})
+        data, err := fileMgr.GetChunk(id, idx)
+        if err != nil {
+            http.Error(w, "Chunk not found", 404)
+            return
+        }
+        w.Write(data)
+    })
 
-	privateMux.HandleFunc("/api/peers", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		myAddr := ""
-		if torCtrl.Onion != nil {
-			myAddr = torCtrl.Onion.ID + ".onion"
-		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"self":     myAddr,
-			"nickname": profileMgr.GetNickname(),
-			"peers":    pm.GetPeers(),
-		})
-	})
+    // -------------------------------------------------------------------------
+    // 🚀 START TOR WITH PUBLIC MUX
+    // -------------------------------------------------------------------------
+    go func() {
+        onionAddr, err := torCtrl.Start(dataDir, identityKey, publicMux)
+        if err != nil {
+            log.Printf("❌ Tor Setup Failed: %v", err)
+            return
+        }
+        fmt.Printf("\n🧅 ONION SERVICE LIVE: %s.onion (Secured API Only)\n", onionAddr)
+    }()
 
-	privateMux.HandleFunc("/api/peers/add", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			return
-		}
-		var req struct{ OnionAddress string `json:"onion_address"` }
-		json.NewDecoder(r.Body).Decode(&req)
-		target := Sanitize(req.OnionAddress)
-		if target == "" {
-			return
-		}
-		if torCtrl.Onion != nil && target == torCtrl.Onion.ID+".onion" {
-			return
-		}
+    // =========================================================================
+    // 2. PRIVATE MUX (Served over Localhost)
+    // =========================================================================
+    // This router allows FULL ACCESS (UI, Admin, Sending, Deleting).
+    privateMux := http.NewServeMux()
 
-		if !pm.HasPeer(target) {
-			pm.AddPeer(target, "direct", "", "", "")
-		}
-		go PerformHandshake(torCtrl, pm, target, chatMgr.GetMyPublicKey(), profileMgr.GetNickname())
-		w.Write([]byte(`{"status":"success"}`))
-	})
+    // -- Internal: UI Routes --
+    privateMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+        status := "Initializing..."
+        onion := "Loading..."
+        myOnion := ""
+        if torCtrl.Ready && torCtrl.Onion != nil {
+            status = "Online"
+            onion = torCtrl.Onion.ID + ".onion"
+            myOnion = torCtrl.Onion.ID + ".onion"
+        }
+        data := UIContext{
+            AppVersion:  "0.9.20 (FileShare)",
+            OnionAddr:   onion,
+            MyOnionAddr: myOnion,
+            Status:      status,
+            Peers:       pm.GetPeers(),
+            Nickname:    profileMgr.GetNickname(),
+            SharedCount: len(fileMgr.LocalFiles),
+        }
 
-	// -- Internal: Chat APIs --
-	privateMux.HandleFunc("/api/chat/history", func(w http.ResponseWriter, r *http.Request) {
-		peer := r.URL.Query().Get("peer")
-		msgs := chatMgr.GetHistory(peer)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(msgs)
-	})
+        tmpl, _ := template.ParseGlob("webui/templates/*.html")
+        tmpl.ExecuteTemplate(w, "index.html", data)
+    })
 
-	privateMux.HandleFunc("/api/chat/status", func(w http.ResponseWriter, r *http.Request) {
-		list := chatMgr.GetStatusList()
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(list)
-	})
+    // -- Internal: Peer Management --
+    privateMux.HandleFunc("/api/peers/delete", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost { return }
+        var req struct { OnionAddress string `json:"onion_address"` }
+        json.NewDecoder(r.Body).Decode(&req)
+        if req.OnionAddress != "" {
+            pm.RemovePeer(req.OnionAddress)
+            chatMgr.DeleteConversation(req.OnionAddress)
+        }
+        w.Write([]byte(`{"status":"success"}`))
+    })
 
-	privateMux.HandleFunc("/api/chat/send", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			return
-		}
-		var req struct {
-			To      string `json:"to"`
-			Content string `json:"content"`
-		}
-		json.NewDecoder(r.Body).Decode(&req)
-		if req.To == "" || req.Content == "" {
-			return
-		}
+    privateMux.HandleFunc("/api/peers/block", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost { return }
+        var req struct { OnionAddress string `json:"onion_address"` }
+        json.NewDecoder(r.Body).Decode(&req)
+        blocked := false
+        if req.OnionAddress != "" {
+            blocked = pm.ToggleBlock(req.OnionAddress)
+        }
+        json.NewEncoder(w).Encode(map[string]bool{"blocked": blocked})
+    })
 
-		msgID := fmt.Sprintf("%d-%d", time.Now().UnixNano(), time.Now().Unix())
-		msg := chat.Message{
-			ID:        msgID,
-			From:      "me",
-			To:        req.To,
-			Content:   req.Content,
-			Timestamp: time.Now(),
-			Incoming:  false,
-			Status:    "pending",
-		}
-		chatMgr.SaveMessage(req.To, msg)
-		go func() {
-			AttemptSendMessage(torCtrl, pm, chatMgr, req.To, msg, profileMgr.GetNickname())
-		}()
-		w.Write([]byte(`{"status":"queued"}`))
-	})
+    privateMux.HandleFunc("/api/peers", func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "application/json")
+        myAddr := ""
+        if torCtrl.Onion != nil {
+            myAddr = torCtrl.Onion.ID + ".onion"
+        }
+        json.NewEncoder(w).Encode(map[string]interface{}{
+            "self":     myAddr,
+            "nickname": profileMgr.GetNickname(),
+            "peers":    pm.GetPeers(),
+        })
+    })
 
-	// -- Internal: Feed APIs --
-	privateMux.HandleFunc("/api/feed/history", func(w http.ResponseWriter, r *http.Request) {
-		msgs := chatMgr.GetFeedHistory()
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(msgs)
-	})
+    privateMux.HandleFunc("/api/peers/add", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost { return }
+        var req struct{ OnionAddress string `json:"onion_address"` }
+        json.NewDecoder(r.Body).Decode(&req)
+        target := Sanitize(req.OnionAddress)
+        if target == "" { return }
+        if torCtrl.Onion != nil && target == torCtrl.Onion.ID+".onion" { return }
 
-	privateMux.HandleFunc("/api/feed/send", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			return
-		}
-		var req struct {
-			Content string `json:"content"`
-		}
-		json.NewDecoder(r.Body).Decode(&req)
-		if req.Content == "" {
-			return
-		}
+        if !pm.HasPeer(target) {
+            pm.AddPeer(target, "direct", "", "", "")
+        }
+        go PerformHandshake(torCtrl, pm, target, chatMgr.GetMyPublicKey(), profileMgr.GetNickname())
+        w.Write([]byte(`{"status":"success"}`))
+    })
 
-		go AttemptSendFeedMessage(torCtrl, pm, chatMgr, req.Content, profileMgr.GetNickname())
-		w.Write([]byte(`{"status":"broadcasted"}`))
-	})
+    privateMux.HandleFunc("/api/identity", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method == http.MethodPost {
+            var req struct { Nickname string `json:"nickname"` }
+            json.NewDecoder(r.Body).Decode(&req)
+            if req.Nickname != "" {
+                profileMgr.SetNickname(req.Nickname)
+            }
+        }
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(map[string]string{"nickname": profileMgr.GetNickname()})
+    })
 
-	// -------------------------------------------------------------------------
-	// 🖥️ START LOCAL SERVER WITH PRIVATE MUX
-	// -------------------------------------------------------------------------
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	fmt.Printf("🖥️  AXON UI Ready at http://%s\n", addr)
-	fmt.Println("🔒 Admin UI is RESTRICTED to Localhost only.")
+    // -- Internal: Chat APIs --
+    privateMux.HandleFunc("/api/chat/history", func(w http.ResponseWriter, r *http.Request) {
+        peer := r.URL.Query().Get("peer")
+        msgs := chatMgr.GetHistory(peer)
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(msgs)
+    })
 
-	if err := http.ListenAndServe(addr, privateMux); err != nil {
-		log.Fatalf("❌ Web UI failed to start: %v", err)
-	}
+    privateMux.HandleFunc("/api/chat/status", func(w http.ResponseWriter, r *http.Request) {
+        list := chatMgr.GetStatusList()
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(list)
+    })
+
+    privateMux.HandleFunc("/api/chat/send", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost { return }
+        var req struct {
+            To      string `json:"to"`
+            Content string `json:"content"`
+        }
+        json.NewDecoder(r.Body).Decode(&req)
+        if req.To == "" || req.Content == "" { return }
+
+        msgID := fmt.Sprintf("%d-%d", time.Now().UnixNano(), time.Now().Unix())
+        msg := chat.Message{
+            ID:        msgID,
+            From:      "me",
+            To:        req.To,
+            Content:   req.Content,
+            Timestamp: time.Now(),
+            Incoming:  false,
+            Status:    "pending",
+        }
+        chatMgr.SaveMessage(req.To, msg)
+
+        // Attempt immediate send (Outbox will retry if this fails)
+        go func() {
+             AttemptSendMessage(torCtrl, pm, chatMgr, req.To, msg, profileMgr.GetNickname())
+        }()
+        w.Write([]byte(`{"status":"queued"}`))
+    })
+
+    // -- Internal: Feed APIs --
+    privateMux.HandleFunc("/api/feed/history", func(w http.ResponseWriter, r *http.Request) {
+        msgs := chatMgr.GetFeedHistory()
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(msgs)
+    })
+
+    privateMux.HandleFunc("/api/feed/send", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost { return }
+        var req struct { Content string `json:"content"` }
+        json.NewDecoder(r.Body).Decode(&req)
+        if req.Content == "" { return }
+
+        go AttemptSendFeedMessage(torCtrl, pm, chatMgr, req.Content, profileMgr.GetNickname())
+        w.Write([]byte(`{"status":"broadcasted"}`))
+    })
+
+    // -- Internal: File APIs --
+
+    privateMux.HandleFunc("/api/files/search", func(w http.ResponseWriter, r *http.Request) {
+        q := r.URL.Query().Get("q")
+        results := fileMgr.Search(q)
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(results)
+    })
+
+    privateMux.HandleFunc("/api/files/download", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodPost { return }
+        var req struct {
+            PeerID   string `json:"peer_id"`
+            FileID   string `json:"file_id"`
+            FileName string `json:"file_name"`
+            Size     int64  `json:"size"`
+        }
+        json.NewDecoder(r.Body).Decode(&req)
+
+        go PerformDownload(torCtrl, fileMgr, req.PeerID, req.FileID, req.FileName, req.Size)
+        w.Write([]byte(`{"status":"started"}`))
+    })
+
+    privateMux.HandleFunc("/api/files/status", func(w http.ResponseWriter, r *http.Request) {
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(fileMgr.GetTransfers())
+    })
+
+    privateMux.HandleFunc("/api/files/refresh", func(w http.ResponseWriter, r *http.Request) {
+        fileMgr.ScanSharedFolder()
+        w.Write([]byte(`{"status":"refreshed"}`))
+    })
+
+    // -------------------------------------------------------------------------
+    // 🖥️ START LOCAL SERVER WITH PRIVATE MUX
+    // -------------------------------------------------------------------------
+    addr := fmt.Sprintf("127.0.0.1:%d", port)
+    fmt.Printf("🖥️  AXON UI Ready at http://%s\n", addr)
+    fmt.Println("🔒 Admin UI is RESTRICTED to Localhost only.")
+
+    if err := http.ListenAndServe(addr, privateMux); err != nil {
+        log.Fatalf("❌ Web UI failed to start: %v", err)
+    }
 }
