@@ -29,11 +29,14 @@ const Utils = {
         return (Math.abs(hash) % 360) * (Math.PI / 180);
     },
     getStatusColor(peer) {
-        return this.getStatusLabel(peer) === 'online' ? 'var(--success)' : 'var(--text-dim)';
+        const diff = (new Date() - new Date(peer.last_seen)) / 1000;
+        if (diff < 300) return 'var(--success)';
+        if (diff < 3600) return 'var(--warning)';
+        return 'var(--text-dim)';
     },
     getStatusLabel(peer) {
         const diff = (new Date() - new Date(peer.last_seen)) / 1000;
-        return diff < 300 ? 'online' : 'offline'; // 5 min timeout
+        return diff < 300 ? 'online' : 'offline';
     },
     timeAgo(dateStr) {
         const diff = Math.floor((new Date() - new Date(dateStr)) / 1000);
@@ -46,79 +49,230 @@ const Utils = {
 
 // --- PHYSICS GRAPH ENGINE ---
 const Graph = {
-    nodes: [], links: [], transform: { x: 0, y: 0, k: 1 }, width: 0, height: 0, dragging: false, lastX: 0, lastY: 0,
+    nodes: [],
+    links: [],
+    transform: { x: 0, y: 0, k: 1 },
+    width: 0,
+    height: 0,
+    dragging: false,
+    lastX: 0,
+    lastY: 0,
 
     init() {
-        const c = document.getElementById('topology-container');
-        if(!c) return;
-        this.updateSize(); this.transform.x=this.width/2; this.transform.y=this.height/2;
-        new ResizeObserver(()=>{this.updateSize()}).observe(c);
-        c.addEventListener('mousedown',e=>{this.dragging=true;this.lastX=e.clientX;this.lastY=e.clientY;c.style.cursor='grabbing'});
-        window.addEventListener('mouseup',()=>{this.dragging=false;if(c)c.style.cursor='default'});
-        c.addEventListener('mousemove',e=>{if(this.dragging){this.transform.x+=e.clientX-this.lastX;this.transform.y+=e.clientY-this.lastY;this.lastX=e.clientX;this.lastY=e.clientY;this.render()}});
-        c.addEventListener('wheel',e=>{e.preventDefault();this.transform.k=Math.min(Math.max(0.2,this.transform.k*(1-e.deltaY*0.001)),4);this.render()});
-        requestAnimationFrame(()=>this.tick());
-    },
-    updateSize(){ const c=document.getElementById('topology-container'); if(c){this.width=c.clientWidth;this.height=c.clientHeight;}},
-    updateData(peers) {
-        const nn=[], nl=[], map={};
-        let me=this.nodes.find(n=>n.id==='ME'); if(!me) me={id:'ME',x:0,y:0,vx:0,vy:0,fixed:true};
-        nn.push(me); map['ME']=me;
-        peers.forEach(p=>{
-            let n=this.nodes.find(x=>x.id===p.onion_address);
-            if(!n) n={id:p.onion_address,x:Math.random(),y:Math.random(),vx:0,vy:0,data:p}; else n.data=p;
-            nn.push(n); map[p.onion_address]=n;
+        const container = document.getElementById('topology-container');
+        if(!container) return;
+
+        this.updateSize();
+        this.transform.x = this.width / 2;
+        this.transform.y = this.height / 2;
+
+        new ResizeObserver(() => this.updateSize()).observe(container);
+
+        container.addEventListener('mousedown', e => {
+            this.dragging = true;
+            this.lastX = e.clientX;
+            this.lastY = e.clientY;
+            container.style.cursor = 'grabbing';
         });
-        peers.forEach(p=>{
-            let tid=p.introduced_by||'ME'; if(!map[tid]) tid='ME';
-            if(map[tid]) nl.push({source:map[p.onion_address],target:map[tid],isOrphan:tid==='ME'&&p.introduced_by!==''});
+        window.addEventListener('mouseup', () => {
+            this.dragging = false;
+            if(container) container.style.cursor = 'default';
         });
-        this.nodes=nn; this.links=nl;
+        container.addEventListener('mousemove', e => {
+            if(!this.dragging) return;
+            const dx = e.clientX - this.lastX;
+            const dy = e.clientY - this.lastY;
+            this.transform.x += dx;
+            this.transform.y += dy;
+            this.lastX = e.clientX;
+            this.lastY = e.clientY;
+            this.render();
+        });
+        container.addEventListener('wheel', e => {
+            e.preventDefault();
+            const scaleAmount = -e.deltaY * 0.001;
+            const newScale = Math.min(Math.max(0.2, this.transform.k * (1 + scaleAmount)), 4);
+            this.transform.k = newScale;
+            this.render();
+        });
+
+        requestAnimationFrame(() => this.tick());
     },
-    tick() {
-        const REP=800, LEN=100, K=0.04, FRIC=0.92, GRAV=0.005;
-        for(let i=0;i<this.nodes.length;i++){
-            let a=this.nodes[i]; if(a.fixed) continue;
-            for(let j=0;j<this.nodes.length;j++){
-                if(i===j) continue; let b=this.nodes[j], dx=a.x-b.x, dy=a.y-b.y, d=Math.sqrt(dx*dx+dy*dy)||1;
-                let f=REP/(d*d); a.vx+=dx/d*f; a.vy+=dy/d*f;
-            }
-            a.vx-=a.x*GRAV; a.vy-=a.y*GRAV;
+
+    updateSize() {
+        const container = document.getElementById('topology-container');
+        if(container) {
+            this.width = container.clientWidth;
+            this.height = container.clientHeight;
         }
-        this.links.forEach(l=>{
-            let a=l.source, b=l.target, dx=a.x-b.x, dy=a.y-b.y, d=Math.sqrt(dx*dx+dy*dy)||1;
-            let f=(d-LEN)*K; if(!a.fixed){a.vx-=dx/d*f; a.vy-=dy/d*f;} if(!b.fixed){b.vx+=dx/d*f; b.vy+=dy/d*f;}
-        });
-        this.nodes.forEach(n=>{if(!n.fixed){n.vx*=FRIC;n.vy*=FRIC;n.x+=n.vx;n.y+=n.vy}});
-        this.render();
-        requestAnimationFrame(()=>this.tick());
     },
-    render() {
-        const div=document.getElementById('topology-nodes'), svg=document.getElementById('topology-svg');
-        if(!div||!svg) return;
-        const {x:tx,y:ty,k:s}=this.transform;
-        let lH='', nH='';
-        this.links.forEach(l=>{
-            let x1=l.source.x*s+tx, y1=l.source.y*s+ty, x2=l.target.x*s+tx, y2=l.target.y*s+ty;
-            let col = l.isOrphan ? 'var(--text-dim)' : (l.source.data.introduced_by ? 'var(--warning)' : 'var(--primary)');
-            let dash = l.source.data.introduced_by ? 'stroke-dasharray="4,4"' : '';
-            lH+=`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${col}" stroke-width="1" stroke-opacity="0.4" ${dash}/>`;
+
+    updateData(peers) {
+        const newNodes = [];
+        const newLinks = [];
+        const idMap = {};
+
+        // ME Node
+        let me = this.nodes.find(n => n.id === 'ME');
+        if(!me) me = { id: 'ME', x: 0, y: 0, vx: 0, vy: 0, fixed: true };
+        newNodes.push(me);
+        idMap['ME'] = me;
+
+        // Peer Nodes
+        peers.forEach(p => {
+            let node = this.nodes.find(n => n.id === p.onion_address);
+            if(!node) {
+                const angle = Math.random() * Math.PI * 2;
+                node = {
+                    id: p.onion_address,
+                    x: Math.cos(angle)*50,
+                    y: Math.sin(angle)*50,
+                    vx: 0, vy: 0,
+                    data: p
+                };
+            } else {
+                node.data = p;
+            }
+            newNodes.push(node);
+            idMap[p.onion_address] = node;
         });
-        this.nodes.forEach(n=>{
-            let px=n.x*s+tx, py=n.y*s+ty;
-            if(n.fixed) nH+=`<div style="position:absolute;left:${px}px;top:${py}px;transform:translate(-50%,-50%);width:60px;height:60px;background:var(--bg-panel);border:2px solid var(--primary);border-radius:50%;display:flex;justify-content:center;align-items:center;z-index:10;box-shadow:0 0 20px rgba(6,182,212,0.2);">${Utils.icon('user','width:30px;color:var(--primary)')}</div><div style="position:absolute;left:${px}px;top:${py+40}px;transform:translateX(-50%);color:var(--primary);font-size:10px;font-weight:bold;background:rgba(0,0,0,0.8);padding:2px 4px;border-radius:4px;">YOU</div>`;
-            else {
-                let stat=Utils.getStatusColor(n.data), isDir=!n.data.introduced_by, sz=isDir?40:32, ic=isDir?'zap':'shield';
-                nH+=`<div onclick="App.Chat.open('${n.id}','${n.data.nickname}')" title="${n.id}" style="cursor:pointer;position:absolute;left:${px}px;top:${py}px;transform:translate(-50%,-50%);width:${sz}px;height:${sz}px;background:var(--bg-panel);border:2px solid ${stat};border-radius:50%;display:flex;justify-content:center;align-items:center;z-index:10;box-shadow:0 0 10px ${stat}40;color:${stat}">${Utils.icon(ic)}</div><div style="position:absolute;left:${px}px;top:${py+sz/2+5}px;transform:translateX(-50%);color:var(--text-dim);font-size:9px;background:rgba(0,0,0,0.8);padding:2px 4px;border-radius:4px;pointer-events:none;white-space:nowrap;z-index:11;">${n.data.nickname||'Peer'}</div>`;
+
+        // Links
+        peers.forEach(p => {
+            let targetId = p.introduced_by ? p.introduced_by : 'ME';
+            if (!idMap[targetId]) targetId = 'ME';
+
+            if(idMap[targetId]) {
+                newLinks.push({
+                    source: idMap[p.onion_address],
+                    target: idMap[targetId],
+                    isOrphan: (targetId === 'ME' && p.introduced_by !== '')
+                });
             }
         });
-        svg.innerHTML=lH; div.innerHTML=nH;
+
+        this.nodes = newNodes;
+        this.links = newLinks;
+    },
+
+    tick() {
+        const REPULSION = 800;
+        const SPRING_LEN = 100;
+        const K_SPRING = 0.04;
+        const FRICTION = 0.92;
+        const CENTER_GRAVITY = 0.005;
+
+        for (let i = 0; i < this.nodes.length; i++) {
+            const a = this.nodes[i];
+            if(a.fixed) continue;
+
+            for (let j = 0; j < this.nodes.length; j++) {
+                if (i === j) continue;
+                const b = this.nodes[j];
+                const dx = a.x - b.x;
+                const dy = a.y - b.y;
+                let dist = Math.sqrt(dx*dx + dy*dy) || 1;
+                const force = REPULSION / (dist * dist);
+                a.vx += (dx / dist) * force;
+                a.vy += (dy / dist) * force;
+            }
+
+            a.vx -= a.x * CENTER_GRAVITY;
+            a.vy -= a.y * CENTER_GRAVITY;
+        }
+
+        this.links.forEach(link => {
+            const a = link.source;
+            const b = link.target;
+            const dx = a.x - b.x;
+            const dy = a.y - b.y;
+            const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+            const displacement = dist - SPRING_LEN;
+            const force = displacement * K_SPRING;
+            const fx = (dx / dist) * force;
+            const fy = (dy / dist) * force;
+
+            if(!a.fixed) { a.vx -= fx; a.vy -= fy; }
+            if(!b.fixed) { b.vx += fx; b.vy += fy; }
+        });
+
+        this.nodes.forEach(n => {
+            if(!n.fixed) {
+                n.vx *= FRICTION;
+                n.vy *= FRICTION;
+                n.x += n.vx;
+                n.y += n.vy;
+            }
+        });
+
+        this.render();
+        requestAnimationFrame(() => this.tick());
+    },
+
+    render() {
+        const nodesDiv = document.getElementById('topology-nodes');
+        const svg = document.getElementById('topology-svg');
+        if(!nodesDiv || !svg) return;
+
+        const { x: tx, y: ty, k: scale } = this.transform;
+
+        let svgHtml = '';
+        this.links.forEach(l => {
+            const x1 = l.source.x * scale + tx;
+            const y1 = l.source.y * scale + ty;
+            const x2 = l.target.x * scale + tx;
+            const y2 = l.target.y * scale + ty;
+
+            let color = 'var(--primary)';
+            let dash = '';
+
+            if(l.isOrphan) {
+                color = 'var(--text-dim)';
+                dash = 'stroke-dasharray="2,4"';
+            } else if (l.source.data && l.source.data.introduced_by) {
+                color = 'var(--warning)';
+                dash = 'stroke-dasharray="4,4"';
+            }
+
+            svgHtml += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="1" stroke-opacity="0.4" ${dash}/>`;
+        });
+        svg.innerHTML = svgHtml;
+
+        let nodesHtml = '';
+        this.nodes.forEach(n => {
+            const px = n.x * scale + tx;
+            const py = n.y * scale + ty;
+
+            if(n.fixed) {
+                nodesHtml += `
+                <div style="position:absolute; left:${px}px; top:${py}px; transform:translate(-50%, -50%); width:60px; height:60px; background:var(--bg-panel); border:2px solid var(--primary); border-radius:50%; display:flex; align-items:center; justify-content:center; z-index:10; box-shadow: 0 0 20px rgba(6,182,212,0.2);">
+                    ${Utils.icon('user', 'width:30px; height:30px; color:var(--primary);')}
+                </div>
+                <div style="position:absolute; left:${px}px; top:${py+40}px; transform:translateX(-50%); color:var(--primary); font-size:10px; font-weight:bold; letter-spacing:1px; background:rgba(0,0,0,0.8); padding:2px 4px; border-radius:4px;">YOU</div>`;
+            } else {
+                const status = Utils.getStatusColor(n.data);
+                const isDirect = !n.data.introduced_by;
+                const size = isDirect ? 40 : 32;
+                const icon = isDirect ? 'zap' : 'shield';
+
+                nodesHtml += `
+                <div title="${n.id}" onclick="App.Chat.open('${n.id}', '${n.data.nickname}')"
+                     style="position:absolute; left:${px}px; top:${py}px; transform:translate(-50%, -50%); width:${size}px; height:${size}px; background:var(--bg-panel); border:2px solid ${status}; border-radius:50%; display:flex; align-items:center; justify-content:center; cursor:pointer; z-index:10; box-shadow: 0 0 10px ${status}40;">
+                    <div style="color: ${status}">${Utils.icon(icon)}</div>
+                </div>
+                <div style="position:absolute; left:${px}px; top:${py + (size/2) + 5}px; transform:translateX(-50%); color:var(--text-dim); font-size:9px; background:rgba(0,0,0,0.8); padding:2px 4px; border-radius:4px; pointer-events:none; white-space:nowrap; z-index:11;">
+                    ${n.data.nickname || 'Peer'}
+                </div>`;
+            }
+        });
+        nodesDiv.innerHTML = nodesHtml;
     }
 };
 
-// --- APP CONTROLLER ---
 const App = {
-    peers: [], selfAddress: "", activePeer: null,
+    peers: [],
+    selfAddress: "",
+    activePeer: null,
 
     init() {
         console.log("AXON: App Init");
@@ -138,36 +292,32 @@ const App = {
             this.peers = rawPeers;
             this.selfAddress = data.self || "";
 
-            // 1. UPDATE HUD FIRST (Guaranteed Update)
-            const elAll = document.getElementById('hud-node-count-all');
-            const elOnline = document.getElementById('hud-node-count-online');
-            if(elAll) elAll.innerText = this.peers.length + 1;
-
-            let online = 1; // Count self
-            this.peers.forEach(p => {
-                if(Utils.getStatusLabel(p) === 'online') online++;
-            });
-            if(elOnline) elOnline.innerText = online;
-
-            // 2. Update Visualizations
             Graph.updateData(this.peers);
+
             if (this.UI.currentTab === 'network') {
                 this.Network.renderList(this.peers);
             }
 
+            const elAll = document.getElementById('hud-node-count-all');
+            const elOnline = document.getElementById('hud-node-count-online');
+            if(elAll) elAll.innerText = this.peers.length + 1;
+            let online = 1;
+            this.peers.forEach(p => { if(Utils.getStatusColor(p) === 'var(--success)') online++; });
+            if(elOnline) elOnline.innerText = online;
+
         } catch(e) { console.error("Peer Poll Error", e); }
 
         try {
-             // Poll Chat Status (Badge)
-             const res = await fetch('/api/chat/status');
-             const chatData = await res.json() || [];
+            const res = await fetch('/api/chat/status');
+            const chatData = await res.json() || [];
 
-             // Update Badge
-             let unreadTotal = 0;
-             chatData.forEach(c => { if(c.unread) unreadTotal++; });
-             this.UI.updateBadge(unreadTotal);
+            let unreadTotal = 0;
+            chatData.forEach(c => {
+                if(c.unread) unreadTotal++;
+            });
+            this.UI.updateBadge(unreadTotal);
 
-             if (this.UI.currentTab === 'chat') {
+            if (this.UI.currentTab === 'chat') {
                 this.Chat.renderSidebar(this.peers, chatData);
                 if (this.activePeer) this.Chat.pollMessages();
             }
@@ -223,11 +373,23 @@ const App = {
 
             el.innerHTML = peers.map(p => {
                 const s = map[p.onion_address] || {};
-                const active = App.activePeer === p.onion_address ? 'background: var(--bg-card);' : '';
-                const showBadge = s.unread && !active;
-                return `<div onclick="App.Chat.open('${p.onion_address}', '${p.nickname}')" style="padding: 10px; border-bottom: 1px solid var(--border); cursor: pointer; ${active}">
-                    <div style="display: flex; align-items: center; margin-bottom: 4px;"><div style="color: white; font-weight: bold;">${p.nickname || 'Peer'}</div>${showBadge ? '<div class="bg-red rounded-full" style="width: 8px; height: 8px; margin-left: auto;"></div>' : ''}</div>
-                    <div style="color: var(--text-dim); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${s.snippet || 'No messages'}</div></div>`;
+                const isActive = App.activePeer === p.onion_address;
+
+                const activeStyle = isActive ? 'background: var(--bg-card);' : '';
+
+                const showBadge = s.unread && !isActive;
+                const badgeHtml = showBadge ? `<div class="bg-red rounded-full" style="width: 8px; height: 8px; margin-left: auto;"></div>` : '';
+
+                return `
+                <div onclick="App.Chat.open('${p.onion_address}', '${p.nickname}')" style="padding: 10px; border-bottom: 1px solid var(--border); cursor: pointer; ${activeStyle}">
+                    <div style="display: flex; align-items: center; margin-bottom: 4px;">
+                        <div style="color: white; font-weight: bold;">${p.nickname || 'Peer'}</div>
+                        ${badgeHtml}
+                    </div>
+                    <div style="color: var(--text-dim); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">
+                        ${s.snippet || 'No messages'}
+                    </div>
+                </div>`;
             }).join('');
         },
         open(id, nick) {
@@ -244,16 +406,25 @@ const App = {
                 const res = await fetch(`/api/chat/history?peer=${encodeURIComponent(App.activePeer)}`);
                 const msgs = await res.json();
                 const el = document.getElementById('chat-messages');
+
                 el.innerHTML = msgs.map(m => {
-                     const align = m.incoming ? 'align-self: flex-start; background: var(--bg-card);' : 'align-self: flex-end; background: var(--primary); color: white;';
-                     let statusIcon = '';
-                     if (!m.incoming) {
+                    const align = m.incoming ? 'align-self: flex-start; background: var(--bg-card);' : 'align-self: flex-end; background: var(--primary); color: white;';
+                    let statusIcon = '';
+                    if (!m.incoming) {
                         if (m.status === 'sent') statusIcon = Utils.icon('check', 'color: var(--text-bright); width:12px; height:12px; margin-left:5px;');
                         else if (m.status === 'pending') statusIcon = Utils.icon('loader', 'color: var(--text-dim); width:12px; height:12px; margin-left:5px;');
-                     }
-                     return `<div style="display:flex; flex-direction:column; ${m.incoming ? 'align-items:flex-start' : 'align-items:flex-end'}; max-width: 100%;">
-                        <div style="${align} padding: 8px 12px; border-radius: 6px; max-width: 70%; font-size: 13px; border: 1px solid var(--border);">${m.content}</div>
-                        <div style="font-size: 9px; color: var(--text-dim); margin-top: 2px; display:flex; align-items:center;">${new Date(m.timestamp).toLocaleTimeString()}${statusIcon}</div></div>`;
+                    }
+
+                    return `
+                    <div style="display:flex; flex-direction:column; ${m.incoming ? 'align-items:flex-start' : 'align-items:flex-end'}; max-width: 100%;">
+                        <div style="${align} padding: 8px 12px; border-radius: 6px; max-width: 70%; font-size: 13px; border: 1px solid var(--border);">
+                            ${m.content}
+                        </div>
+                        <div style="font-size: 9px; color: var(--text-dim); margin-top: 2px; display:flex; align-items:center;">
+                            ${new Date(m.timestamp).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}
+                            ${statusIcon}
+                        </div>
+                    </div>`;
                 }).join('');
             } catch(e) {}
         },
@@ -283,14 +454,23 @@ const App = {
             if(e && e.key !== 'Enter') return;
             const q = document.getElementById('file-search-input').value;
             if(!q) return;
+
             try {
                 const res = await fetch(`/api/files/search?q=${encodeURIComponent(q)}`);
                 const files = await res.json();
                 const el = document.getElementById('file-results');
+
                 el.innerHTML = files && files.length ? files.map(f => `
                 <div style="background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 15px; display: flex; flex-direction: column; justify-content: space-between; height: 100%;">
-                    <div style="margin-bottom: 10px;"><div style="color: var(--text-bright); font-weight: bold; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${f.name}">${f.name}</div><div style="color: var(--text-dim); font-size: 11px; margin-top: 4px;">SIZE: ${(f.size/1024/1024).toFixed(2)} MB</div><div style="color: var(--primary); font-size: 11px; font-family: monospace;">OWNER: ${f.owner.substring(0,8)}...</div></div>
-                    <button onclick="App.Files.download('${f.owner}', '${f.id}', '${f.name}', ${f.size}')" style="width: 100%; background: transparent; border: 1px solid var(--primary); color: var(--primary); padding: 8px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 5px;">${Utils.icon('download')} Download</button>
+                    <div style="margin-bottom: 10px;">
+                        <div style="color: var(--text-bright); font-weight: bold; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${f.name}">${f.name}</div>
+                        <div style="color: var(--text-dim); font-size: 11px; margin-top: 4px;">SIZE: ${(f.size/1024/1024).toFixed(2)} MB</div>
+                        <div style="color: var(--primary); font-size: 11px; font-family: monospace;">OWNER: ${f.owner.substring(0,8)}...</div>
+                    </div>
+                    <button onclick="App.Files.download('${f.owner}', '${f.id}', '${f.name}', ${f.size})"
+                        style="width: 100%; background: transparent; border: 1px solid var(--primary); color: var(--primary); padding: 8px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 5px;">
+                        ${Utils.icon('download')} Download
+                    </button>
                 </div>`).join('') : `<div style="grid-column: 1 / -1; text-align: center; color: var(--text-dim); margin-top: 40px;">No files found.</div>`;
             } catch(e) {}
         },
@@ -334,10 +514,6 @@ const App = {
             document.querySelectorAll('.view-section').forEach(v => v.classList.toggle('hidden', v.id !== `view-${id}`));
             App.poll();
         },
-        updateBadge(count) {
-            const el = document.getElementById('nav-chat-badge');
-            if(el) { if(count > 0) el.classList.remove('hidden'); else el.classList.add('hidden'); }
-        },
         async addPeer() {
             const onion = prompt("Peer Onion Address:");
             if(onion) await fetch('/api/peers/add', {method:'POST', body:JSON.stringify({onion_address:onion})});
@@ -356,6 +532,10 @@ const App = {
             if(!App.activePeer || !confirm('Delete peer?')) return;
             await fetch('/api/peers/delete', {method:'POST', body:JSON.stringify({onion_address:App.activePeer})});
             window.location.reload();
+        },
+        updateBadge(count) {
+            const el = document.getElementById('nav-chat-badge');
+            if(el) { if(count > 0) el.classList.remove('hidden'); else el.classList.add('hidden'); }
         }
     }
 };
