@@ -18,6 +18,7 @@
             --primary: #06b6d4;
             --success: #10b981;
             --danger: #ef4444;
+            --warning: #f59e0b;
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -31,6 +32,7 @@
             display: flex;
         }
 
+        /* Layout */
         .flex { display: flex; }
         .flex-col { flex-direction: column; }
         .flex-1 { flex: 1; min-height: 0; }
@@ -59,6 +61,13 @@
         }
         .nav-btn.active { color: var(--primary); background: rgba(6,182,212,0.1); border-color: rgba(6,182,212,0.2); }
         .nav-btn:hover { color: var(--text-bright); }
+
+        /* --- MISSING CLASSES RESTORED --- */
+        .bg-red { background-color: var(--danger); }
+        .bg-green { background-color: var(--success); }
+        .text-red { color: var(--danger); }
+        .text-green { color: var(--success); }
+        .rounded-full { border-radius: 9999px; }
 
         input {
             background: #000; border: 1px solid var(--border); color: #fff; padding: 0.5rem; width: 100%;
