@@ -9,13 +9,18 @@ import (
     "encoding/json"
     "fmt"
     "math"
+    "math/rand"
     "sync"
     "time"
 )
 
 var NetworkMutex sync.Mutex
 
+// GOSSIP PARAMETERS
+const GossipFanout = 3 // Number of peers to infect per round
+
 func StartOutboxLoop(torCtrl *tor.Controller, pm *discovery.PeerManager, chatMgr *chat.Manager, fileMgr *files.Manager, getNickname func() string) {
+    // Chat Loop
     go func() {
         for {
             time.Sleep(200 * time.Millisecond)
@@ -34,19 +39,54 @@ func StartOutboxLoop(torCtrl *tor.Controller, pm *discovery.PeerManager, chatMgr
     }()
 }
 
+// --- GOSSIP LOGIC ---
+
+// Helper: Selects N random peers
+func pickRandomPeers(peers []discovery.Peer, n int, excludeAddr string) []discovery.Peer {
+    // Filter exclusions first
+    var candidates []discovery.Peer
+    for _, p := range peers {
+        if p.OnionAddress != excludeAddr {
+            candidates = append(candidates, p)
+        }
+    }
+
+    // Shuffle
+    rand.Shuffle(len(candidates), func(i, j int) {
+        candidates[i], candidates[j] = candidates[j], candidates[i]
+    })
+
+    // Slice
+    if len(candidates) > n {
+        return candidates[:n]
+    }
+    return candidates
+}
+
+// Broadcasts MY files to a random subset
 func BroadcastToAll(torCtrl *tor.Controller, pm *discovery.PeerManager, localFiles []files.FileMetadata) {
     peers := pm.GetPeers()
     if len(peers) == 0 { return }
-    fmt.Printf("📢 Broadcasting manifest to %d neighbors...\n", len(peers))
-    for _, p := range peers {
+
+    targets := pickRandomPeers(peers, GossipFanout, "")
+
+    fmt.Printf("📢 Broadcasting manifest to %d random neighbors (Fanout)...\n", len(targets))
+
+    for _, p := range targets {
         go BroadcastManifest(torCtrl, p.OnionAddress, localFiles, "")
     }
 }
 
+// Forwards OTHERS' files to a random subset (Rumor Mongering)
 func ForwardGossip(torCtrl *tor.Controller, pm *discovery.PeerManager, origin string, manifest []files.FileMetadata) {
     peers := pm.GetPeers()
-    for _, p := range peers {
-        if p.OnionAddress == origin { continue }
+
+    // Don't echo back to origin
+    targets := pickRandomPeers(peers, GossipFanout, origin)
+
+    fmt.Printf("🗣️  Gossip: Forwarding %s's library to %d random neighbors...\n", origin, len(targets))
+
+    for _, p := range targets {
         go BroadcastManifest(torCtrl, p.OnionAddress, manifest, origin)
     }
 }
@@ -136,7 +176,7 @@ func AttemptSendMessage(torCtrl *tor.Controller, pm *discovery.PeerManager, chat
     if err != nil { return false }
 
     wireMsg := chat.WireMessage{
-        ID: msg.ID, // Pass ID for Dedupe
+        ID: msg.ID,
         From: torCtrl.Onion.ID + ".onion",
         Ciphertext: ciphertext,
         Nonce: nonce,
@@ -171,8 +211,6 @@ func AttemptSendFeedMessage(torCtrl *tor.Controller, pm *discovery.PeerManager, 
     jsonBytes, _ := json.Marshal(wireMsg)
 
     peers := pm.GetPeers()
-    fmt.Printf("📢 Broadcasting feed post to %d peers...\n", len(peers))
-
     for _, peer := range peers {
         targetPeer := peer.OnionAddress
         go func(target string) {

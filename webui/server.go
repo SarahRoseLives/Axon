@@ -63,7 +63,6 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager, identit
     publicMux := http.NewServeMux()
     setupPublicRoutes(publicMux, pm, chatMgr, fileMgr, torCtrl, profileMgr)
 
-    // Middleware Logger
     loggingMiddleware := func(next http.Handler) http.Handler {
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
             next.ServeHTTP(w, r)
@@ -88,7 +87,7 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager, identit
             onion = torCtrl.Onion.ID + ".onion"
         }
         data := UIContext{
-            AppVersion:  "0.9.30 (Download Debug)",
+            AppVersion:  "0.9.33 (Fanout Gossip)",
             OnionAddr:   onion,
             Status:      status,
             Peers:       pm.GetPeers(),
@@ -136,8 +135,12 @@ func setupPublicRoutes(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *c
         key := pm.GetPublicKey(from)
         if key == "" { return }
         txt, _ := chatMgr.Decrypt(key, wire.Ciphertext, wire.Nonce)
+
+        msgID := wire.ID
+        if msgID == "" { msgID = fmt.Sprintf("%d", time.Now().UnixNano()) }
+
         chatMgr.SaveMessage(from, chat.Message{
-            ID: fmt.Sprintf("%d", time.Now().UnixNano()),
+            ID: msgID,
             From: from, To: "me", Content: txt, Timestamp: time.Now(), Incoming: true, Status: "received",
         })
         w.Write([]byte("OK"))
@@ -150,11 +153,7 @@ func setupPublicRoutes(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *c
         if len(list) > 0 {
             origin := list[0].Owner
             fmt.Printf("📦 Received manifest: %d files owned by %s\n", len(list), origin)
-
-            // 1. Process Locally
             didLearnNew := fileMgr.ProcessRemoteManifest(origin, list)
-
-            // 2. Gossip Forwarding (If new)
             if didLearnNew {
                 go ForwardGossip(torCtrl, pm, origin, list)
             }
@@ -219,8 +218,6 @@ func setupPrivateAPIs(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *ch
     mux.HandleFunc("/api/files/search", func(w http.ResponseWriter, r *http.Request) {
         json.NewEncoder(w).Encode(fileMgr.Search(r.URL.Query().Get("q")))
     })
-
-    // --- DEBUG ENABLED ---
     mux.HandleFunc("/api/files/download", func(w http.ResponseWriter, r *http.Request) {
         var req struct {
             PeerID   string `json:"peer_id"`
@@ -228,18 +225,11 @@ func setupPrivateAPIs(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *ch
             FileName string `json:"file_name"`
             Size     int64  `json:"size"`
         }
-        if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-            fmt.Printf("❌ JSON Decode Error: %v\n", err)
-            return
-        }
-
-        // This log will prove if the request reaches the server
-        fmt.Printf("📥 Download Request: '%s' from peer '%s'\n", req.FileName, req.PeerID)
-
+        json.NewDecoder(r.Body).Decode(&req)
+        fmt.Printf("📥 Download Request: %s from %s\n", req.FileName, req.PeerID)
         go PerformDownload(torCtrl, fileMgr, req.PeerID, req.FileID, req.FileName, req.Size)
         w.Write([]byte("OK"))
     })
-
     mux.HandleFunc("/api/files/refresh", func(w http.ResponseWriter, r *http.Request) {
         fileMgr.ScanSharedFolder()
         go BroadcastToAll(torCtrl, pm, fileMgr.GetLocalManifest())
