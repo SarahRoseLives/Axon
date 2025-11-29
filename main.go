@@ -1,6 +1,7 @@
 package main
 
 import (
+    "axon/database"
     "axon/discovery"
     "axon/identity"
     "axon/tor"
@@ -12,6 +13,7 @@ import (
 )
 
 func main() {
+    // 1. Setup
     portPtr := flag.Int("port", 8080, "Web UI Port")
     flag.Parse()
     port := *portPtr
@@ -23,17 +25,26 @@ func main() {
 
     os.MkdirAll(dataDir, 0700)
 
-    // Identity
+    // 2. INIT DATABASE (Critical for SQLite)
+    database.Init(dataDir)
+
+    // 3. Identity
+    // We load the key into 'privKey'
     privKey, err := identity.LoadOrGenerateKey(dataDir, "axon_identity")
     if err != nil {
         log.Fatalf("Fatal: Could not load identity: %v", err)
     }
 
-    // Managers
+    // 4. Managers
+    // We only need PeerManager here because it's passed explicitly.
+    // Chat and File managers are initialized inside webui.Start to ensure they share the same context.
     peerManager := discovery.NewPeerManager(dataDir)
+
+    // 5. Tor Controller
     torInstance := tor.NewController()
     defer torInstance.Stop()
 
-    // Start UI & Services (This now starts Files internally)
+    // 6. Start Web UI
+    // FIX: Pass 'privKey' (the variable we declared), not 'identityKey' (which doesn't exist here)
     webui.Start(port, torInstance, peerManager, privKey)
 }

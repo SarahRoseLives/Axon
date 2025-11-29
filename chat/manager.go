@@ -1,27 +1,23 @@
 package chat
 
 import (
+    "axon/database"
     "axon/identity"
     "crypto/aes"
     "crypto/cipher"
     "crypto/ecdh"
     "crypto/rand"
     "encoding/hex"
-    "encoding/json"
     "fmt"
     "io"
-    "os"
-    "path/filepath"
-    "sort"
-    "sync"
-    "time"
+    "sort" // <--- ADDED
+    // Removed "time"
+    // Removed "database/sql"
 )
 
 type Manager struct {
-    mu            sync.RWMutex
-    Conversations map[string]*Conversation
-    DataDir       string
-    PrivKey       *ecdh.PrivateKey
+    DataDir string
+    PrivKey *ecdh.PrivateKey
 }
 
 func NewManager(dataDir string) (*Manager, error) {
@@ -29,204 +25,182 @@ func NewManager(dataDir string) (*Manager, error) {
     if err != nil {
         return nil, err
     }
-    mgr := &Manager{
-        Conversations: make(map[string]*Conversation),
-        DataDir:       dataDir,
-        PrivKey:       privKey,
-    }
-    mgr.loadHistory()
-    return mgr, nil
+
+    return &Manager{
+        DataDir: dataDir,
+        PrivKey: privKey,
+    }, nil
 }
 
 // --- MANAGEMENT ---
 
 func (m *Manager) DeleteConversation(peerID string) {
-    m.mu.Lock()
-    defer m.mu.Unlock()
-
-    if _, exists := m.Conversations[peerID]; exists {
-        delete(m.Conversations, peerID)
-        m.saveInternal()
-        fmt.Printf("🗑️ Deleted conversation with %s\n", peerID)
+    _, err := database.DB.Exec("DELETE FROM messages WHERE peer_id = ?", peerID)
+    if err != nil {
+        fmt.Printf("❌ Error deleting chat %s: %v\n", peerID, err)
+    } else {
+        fmt.Printf("🗑️ Deleted history with %s\n", peerID)
     }
 }
 
 // --- MESSAGE LOGIC ---
 
 func (m *Manager) SaveMessage(targetID string, msg Message) {
-    m.mu.Lock()
-    defer m.mu.Unlock()
-
-    if _, ok := m.Conversations[targetID]; !ok {
-        m.Conversations[targetID] = &Conversation{}
-    }
-    conv := m.Conversations[targetID]
-
-    // --- ROBUST DEDUPLICATION ---
-    for _, existing := range conv.Messages {
-        // 1. Strict ID Match
-        if existing.ID == msg.ID {
-            return
-        }
-        // 2. Fuzzy Match (Same Content + Same Sender + Recent Time)
-        // This catches cases where the ID got regenerated due to network retries
-        if existing.Content == msg.Content && existing.From == msg.From {
-            timeDiff := existing.Timestamp.Sub(msg.Timestamp)
-            if timeDiff > -2*time.Minute && timeDiff < 2*time.Minute {
-                fmt.Printf("⚠️ Ignored duplicate message from %s (Fuzzy Match)\n", targetID)
-                return
-            }
-        }
+    direction := "out"
+    if msg.Incoming {
+        direction = "in"
     }
 
     if msg.Status == "" {
         if msg.Incoming { msg.Status = "received" } else { msg.Status = "pending" }
     }
 
-    conv.Messages = append(conv.Messages, msg)
-    conv.LastActive = time.Now()
+    query := `
+        INSERT OR IGNORE INTO messages (id, peer_id, direction, content, status, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?)
+    `
+    _, err := database.DB.Exec(query, msg.ID, targetID, direction, msg.Content, msg.Status, msg.Timestamp)
 
-    preview := msg.Content
-    if len(preview) > 30 { preview = preview[:27] + "..." }
-    if msg.Incoming {
-        conv.Unread = true
-        conv.Snippet = preview
-    } else {
-        conv.Snippet = "You: " + preview
+    if err != nil {
+        fmt.Printf("❌ DB Write Error: %v\n", err)
     }
-
-    m.saveInternal()
 }
 
 func (m *Manager) SaveFeedMessage(msg Message) {
-    m.mu.Lock()
-    defer m.mu.Unlock()
-
-    const feedKey = "FEED"
-    if _, ok := m.Conversations[feedKey]; !ok {
-        m.Conversations[feedKey] = &Conversation{}
-    }
-    conv := m.Conversations[feedKey]
-
-    // Dedupe Feed
-    for _, existing := range conv.Messages {
-        if existing.ID == msg.ID { return }
-        // Fuzzy Match for Feed
-        if existing.Content == msg.Content && existing.From == msg.From {
-             timeDiff := existing.Timestamp.Sub(msg.Timestamp)
-             if timeDiff > -5*time.Minute && timeDiff < 5*time.Minute {
-                 return
-             }
-        }
-    }
-
     msg.Incoming = true
     msg.Status = "received"
-    conv.Messages = append(conv.Messages, msg)
-    conv.LastActive = time.Now()
 
-    if len(conv.Messages) > 1000 {
-        conv.Messages = conv.Messages[len(conv.Messages)-1000:]
-    }
-
-    m.saveInternal()
+    query := `
+        INSERT OR IGNORE INTO messages (id, peer_id, direction, content, status, timestamp)
+        VALUES (?, ?, 'feed', ?, 'received', ?)
+    `
+    database.DB.Exec(query, msg.ID, msg.From, msg.Content, msg.Timestamp)
 }
 
 func (m *Manager) UpdateMessageStatus(targetID, msgID, status string) {
-    m.mu.Lock()
-    defer m.mu.Unlock()
-
-    conv, exists := m.Conversations[targetID]
-    if !exists { return }
-
-    for i, msg := range conv.Messages {
-        if msg.ID == msgID {
-            conv.Messages[i].Status = status
-            m.saveInternal()
-            return
-        }
-    }
+    query := "UPDATE messages SET status = ? WHERE id = ?"
+    database.DB.Exec(query, status, msgID)
 }
 
 func (m *Manager) GetPendingMessages() map[string][]Message {
-    m.mu.RLock()
-    defer m.mu.RUnlock()
+    rows, err := database.DB.Query(`
+        SELECT id, peer_id, content, timestamp
+        FROM messages
+        WHERE direction = 'out' AND status = 'pending'
+    `)
+    if err != nil { return nil }
+    defer rows.Close()
 
     pending := make(map[string][]Message)
-    for id, conv := range m.Conversations {
-        for _, msg := range conv.Messages {
-            if !msg.Incoming && msg.Status == "pending" {
-                pending[id] = append(pending[id], msg)
-            }
-        }
+
+    for rows.Next() {
+        var msg Message
+        var peerID string
+        rows.Scan(&msg.ID, &peerID, &msg.Content, &msg.Timestamp)
+
+        msg.From = "me"
+        msg.To = peerID
+        msg.Status = "pending"
+        msg.Incoming = false
+
+        pending[peerID] = append(pending[peerID], msg)
     }
     return pending
 }
 
-func (m *Manager) GetHistory(id string) []Message {
-    m.mu.Lock()
-    defer m.mu.Unlock()
+func (m *Manager) GetHistory(peerID string) []Message {
+    database.DB.Exec("UPDATE messages SET status = 'read' WHERE peer_id = ? AND direction = 'in' AND status = 'received'", peerID)
 
-    conv, exists := m.Conversations[id]
-    if exists {
-        conv.Unread = false
-        m.saveInternal()
-        return conv.Messages
+    rows, err := database.DB.Query(`
+        SELECT id, direction, content, status, timestamp
+        FROM messages
+        WHERE peer_id = ?
+        ORDER BY timestamp ASC LIMIT 50
+    `, peerID)
+
+    if err != nil { return []Message{} }
+    defer rows.Close()
+
+    var history []Message
+    for rows.Next() {
+        var m Message
+        var dir string
+        rows.Scan(&m.ID, &dir, &m.Content, &m.Status, &m.Timestamp)
+
+        if dir == "in" {
+            m.Incoming = true
+            m.From = peerID
+            m.To = "me"
+        } else {
+            m.Incoming = false
+            m.From = "me"
+            m.To = peerID
+        }
+        history = append(history, m)
     }
-    return []Message{}
+    return history
 }
 
 func (m *Manager) GetFeedHistory() []Message {
-    m.mu.RLock()
-    defer m.mu.RUnlock()
+    rows, err := database.DB.Query(`
+        SELECT id, peer_id, content, timestamp
+        FROM messages
+        WHERE direction = 'feed'
+        ORDER BY timestamp DESC LIMIT 50
+    `)
+    if err != nil { return []Message{} }
+    defer rows.Close()
 
-    const feedKey = "FEED"
-    if conv, exists := m.Conversations[feedKey]; exists {
-        feed := make([]Message, len(conv.Messages))
-        copy(feed, conv.Messages)
-        sort.Slice(feed, func(i, j int) bool {
-            return feed[i].Timestamp.After(feed[j].Timestamp)
-        })
-        return feed
+    var feed []Message
+    for rows.Next() {
+        var m Message
+        rows.Scan(&m.ID, &m.From, &m.Content, &m.Timestamp)
+        m.To = "MESH"
+        feed = append(feed, m)
     }
-    return []Message{}
+    return feed
 }
 
 func (m *Manager) GetStatusList() []ChatStatus {
-    m.mu.RLock()
-    defer m.mu.RUnlock()
+    rows, err := database.DB.Query("SELECT DISTINCT peer_id FROM messages WHERE direction != 'feed'")
+    if err != nil { return []ChatStatus{} }
+    defer rows.Close()
 
     var list []ChatStatus
-    for id, c := range m.Conversations {
-        if id == "FEED" { continue }
-        list = append(list, ChatStatus{
-            PeerID:     id,
-            Unread:     c.Unread,
-            LastActive: c.LastActive,
-            Snippet:    c.Snippet,
-        })
+
+    for rows.Next() {
+        var pid string
+        rows.Scan(&pid)
+
+        var status ChatStatus
+        status.PeerID = pid
+
+        var content string
+        err = database.DB.QueryRow(`
+            SELECT content, timestamp
+            FROM messages
+            WHERE peer_id = ?
+            ORDER BY timestamp DESC LIMIT 1
+        `, pid).Scan(&content, &status.LastActive)
+
+        if len(content) > 30 { content = content[:27] + "..." }
+        status.Snippet = content
+
+        var count int
+        database.DB.QueryRow(`
+            SELECT COUNT(*) FROM messages
+            WHERE peer_id = ? AND direction = 'in' AND status = 'received'
+        `, pid).Scan(&count)
+
+        status.Unread = count > 0
+        list = append(list, status)
     }
+
     sort.Slice(list, func(i, j int) bool {
         return list[i].LastActive.After(list[j].LastActive)
     })
+
     return list
-}
-
-// --- PERSISTENCE ---
-
-func (m *Manager) loadHistory() {
-    path := filepath.Join(m.DataDir, "chats.json")
-    data, err := os.ReadFile(path)
-    if err == nil {
-        json.Unmarshal(data, &m.Conversations)
-        fmt.Printf("📂 Loaded history for %d conversations\n", len(m.Conversations))
-    }
-}
-
-func (m *Manager) saveInternal() {
-    path := filepath.Join(m.DataDir, "chats.json")
-    data, _ := json.MarshalIndent(m.Conversations, "", "  ")
-    os.WriteFile(path, data, 0600)
 }
 
 // --- CRYPTO ---

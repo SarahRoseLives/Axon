@@ -3,7 +3,7 @@ package chat
 import "time"
 
 type WireMessage struct {
-    ID         string `json:"id"` // <--- NEW: Persist ID across network
+    ID         string `json:"id"`
     From       string `json:"from"`
     Ciphertext string `json:"ciphertext"`
     Nonce      string `json:"nonce"`
@@ -17,7 +17,7 @@ type WireFeedMessage struct {
 
 type Message struct {
     ID        string    `json:"id"`
-    Status    string    `json:"status"` // pending, sent, received
+    Status    string    `json:"status"`
     From      string    `json:"from"`
     To        string    `json:"to"`
     Content   string    `json:"content"`
@@ -26,6 +26,7 @@ type Message struct {
 }
 
 type Conversation struct {
+    // Used only for legacy JSON, not needed for SQL but kept for compatibility if needed
     Messages   []Message `json:"messages"`
     Unread     bool      `json:"unread"`
     LastActive time.Time `json:"last_active"`
