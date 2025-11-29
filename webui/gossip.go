@@ -3,8 +3,11 @@ package webui
 import (
     "axon/discovery"
     "axon/files"
+    "axon/identity"
     "axon/tor"
     "bytes"
+    "crypto/ed25519"
+    "encoding/hex"
     "encoding/json"
     "fmt"
     mrand "math/rand"
@@ -14,8 +17,10 @@ import (
 
 type HandshakeRequest struct {
     OnionAddress string `json:"onion_address"`
-    PublicKey    string `json:"public_key"`
+    PublicKey    string `json:"public_key"` // Chat Key (X25519)
+    IdentityKey  string `json:"identity_key"` // NEW: Identity Key (Ed25519) for Signature
     Nickname     string `json:"nickname"`
+    Signature    string `json:"signature"`
 }
 
 type PeerListResponse struct {
@@ -24,37 +29,43 @@ type PeerListResponse struct {
     Nickname  string   `json:"nickname"`
 }
 
-func StartBackgroundTasks(torCtrl *tor.Controller, pm *discovery.PeerManager, myPubKey string, fileMgr *files.Manager, getNickname func() string) {
+func StartBackgroundTasks(torCtrl *tor.Controller, pm *discovery.PeerManager, myPubKey string, fileMgr *files.Manager, getNickname func() string, privKey ed25519.PrivateKey) {
     go func() {
-        time.Sleep(30 * time.Second) // Let Tor warm up
+        time.Sleep(30 * time.Second) 
         for {
-            time.Sleep(30 * time.Second) // Check for new peers/re-connections
+            time.Sleep(30 * time.Second) 
             if torCtrl.Onion == nil { continue }
-
+            
             peers := pm.GetPeers()
             if len(peers) > 0 {
-                // Pick a random peer to ensure connectivity
                 target := peers[mrand.Intn(len(peers))].OnionAddress
-                // We pass fileMgr here so we can gossip if the handshake succeeds
-                go PerformHandshake(torCtrl, pm, target, myPubKey, fileMgr, getNickname())
+                go PerformHandshake(torCtrl, pm, target, myPubKey, fileMgr, getNickname(), privKey)
             }
         }
     }()
 }
 
-func PerformHandshake(torCtrl *tor.Controller, pm *discovery.PeerManager, target string, myPubKey string, fileMgr *files.Manager, myNickname string) {
+func PerformHandshake(torCtrl *tor.Controller, pm *discovery.PeerManager, target string, myPubKey string, fileMgr *files.Manager, myNickname string, privKey ed25519.PrivateKey) {
     if torCtrl.Onion == nil { return }
+    
+    // Sign the nickname
+    sig := identity.Sign(privKey, []byte(myNickname))
+    
+    // Derive Public Identity Key
+    pubIdKey := hex.EncodeToString(privKey.Public().(ed25519.PublicKey))
+
     client, err := torCtrl.GetHttpClient()
     if err != nil { return }
 
     payload := HandshakeRequest{
         OnionAddress: torCtrl.Onion.ID + ".onion",
-        PublicKey:    myPubKey,
+        PublicKey:    myPubKey,   // For Chat Encryption
+        IdentityKey:  pubIdKey,   // For Signature Verification
         Nickname:     myNickname,
+        Signature:    sig,
     }
     jsonBytes, _ := json.Marshal(payload)
 
-    // Retry loop for robustness
     for i := 1; i <= 2; i++ {
         resp, err := client.Post(
             fmt.Sprintf("http://%s/api/peers/announce", target),
@@ -66,12 +77,10 @@ func PerformHandshake(torCtrl *tor.Controller, pm *discovery.PeerManager, target
             if resp.StatusCode == 200 {
                 var response PeerListResponse
                 if err := json.NewDecoder(resp.Body).Decode(&response); err == nil {
-                    // 1. Update Trust
                     if response.PublicKey != "" {
                         pm.AddPeer(target, "direct", response.PublicKey, response.Nickname, "")
                     }
-
-                    // 2. Process Transitive Peers
+                    
                     for _, p := range response.Peers {
                         clean := Sanitize(p)
                         if clean != payload.OnionAddress && !pm.HasPeer(clean) {
@@ -79,11 +88,12 @@ func PerformHandshake(torCtrl *tor.Controller, pm *discovery.PeerManager, target
                         }
                     }
 
-                    // 3. GOSSIP FILES (Event-Driven)
-                    fmt.Printf("✅ Handshake success with %s. Syncing Library...\n", target)
-
-                    // FIX: Added empty string "" as forceOwner argument
-                    BroadcastManifest(torCtrl, target, fileMgr.GetLocalManifest(), "")
+                    if fileMgr != nil {
+                        fmt.Printf("✅ Handshake success with %s. Syncing Library...\n", target)
+                        BroadcastManifest(torCtrl, target, fileMgr.GetLocalManifest(), "")
+                    } else {
+                        fmt.Printf("✅ Handshake connection restored with %s\n", target)
+                    }
                 }
                 return
             }

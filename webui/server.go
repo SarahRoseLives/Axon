@@ -39,8 +39,8 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager, identit
     fileMgr := files.NewManager(dataDir)
     getNick := func() string { return profileMgr.GetNickname() }
 
-    StartBackgroundTasks(torCtrl, pm, chatMgr.GetMyPublicKey(), fileMgr, getNick)
-    StartOutboxLoop(torCtrl, pm, chatMgr, fileMgr, getNick)
+    StartBackgroundTasks(torCtrl, pm, chatMgr.GetMyPublicKey(), fileMgr, getNick, identityKey)
+    StartOutboxLoop(torCtrl, pm, chatMgr, fileMgr, getNick, identityKey)
 
     renderTemplate := func(w http.ResponseWriter, tmplName string, data interface{}) {
         tmpl, err := template.ParseGlob("webui/templates/*.html")
@@ -61,7 +61,7 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager, identit
     }
 
     publicMux := http.NewServeMux()
-    setupPublicRoutes(publicMux, pm, chatMgr, fileMgr, torCtrl, profileMgr)
+    setupPublicRoutes(publicMux, pm, chatMgr, fileMgr, torCtrl, profileMgr, identityKey)
 
     loggingMiddleware := func(next http.Handler) http.Handler {
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -87,7 +87,7 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager, identit
             onion = torCtrl.Onion.ID + ".onion"
         }
         data := UIContext{
-            AppVersion:  "0.9.33 (Fanout Gossip)",
+            AppVersion:  "0.9.36 (Sig Fix)",
             OnionAddr:   onion,
             Status:      status,
             Peers:       pm.GetPeers(),
@@ -97,14 +97,14 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager, identit
         renderTemplate(w, "index.html", data)
     })
 
-    setupPrivateAPIs(privateMux, pm, chatMgr, fileMgr, torCtrl, profileMgr)
+    setupPrivateAPIs(privateMux, pm, chatMgr, fileMgr, torCtrl, profileMgr, identityKey)
 
     addr := fmt.Sprintf("127.0.0.1:%d", port)
     fmt.Printf("🖥️  AXON UI Ready at http://%s\n", addr)
     http.ListenAndServe(addr, privateMux)
 }
 
-func setupPublicRoutes(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *chat.Manager, fileMgr *files.Manager, torCtrl *tor.Controller, profileMgr *identity.ProfileManager) {
+func setupPublicRoutes(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *chat.Manager, fileMgr *files.Manager, torCtrl *tor.Controller, profileMgr *identity.ProfileManager, identityKey ed25519.PrivateKey) {
     mux.HandleFunc("/api/peers/announce", func(w http.ResponseWriter, r *http.Request) {
         if r.Method != http.MethodPost { return }
         var req HandshakeRequest
@@ -112,12 +112,25 @@ func setupPublicRoutes(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *c
         from := Sanitize(req.OnionAddress)
         if from == "" || pm.IsBlocked(from) { return }
 
-        fmt.Printf("👋 Handshake received from %s\n", from)
-        pm.AddPeer(from, "neighbor", req.PublicKey, req.Nickname, "")
+        // --- FIX: VERIFY WITH IDENTITY KEY ---
+        validSig := false
+        // We verify using the Identity Key they provided (req.IdentityKey)
+        if req.IdentityKey != "" && req.Signature != "" {
+            if identity.Verify(req.IdentityKey, []byte(req.Nickname), req.Signature) {
+                validSig = true
+            } else {
+                 fmt.Printf("⚠️ Signature Invalid for %s\n", from)
+            }
+        }
+
+        finalNick := "Anonymous"
+        if validSig { finalNick = req.Nickname }
+
+        fmt.Printf("👋 Handshake received from %s (%s)\n", from, finalNick)
+        pm.AddPeer(from, "neighbor", req.PublicKey, finalNick, "")
 
         go func() {
             time.Sleep(2 * time.Second)
-            fmt.Printf("↩️  Replying with file manifest to %s\n", from)
             BroadcastManifest(torCtrl, from, fileMgr.GetLocalManifest(), "")
         }()
 
@@ -152,7 +165,6 @@ func setupPublicRoutes(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *c
         if err := json.NewDecoder(r.Body).Decode(&list); err != nil { return }
         if len(list) > 0 {
             origin := list[0].Owner
-            fmt.Printf("📦 Received manifest: %d files owned by %s\n", len(list), origin)
             didLearnNew := fileMgr.ProcessRemoteManifest(origin, list)
             if didLearnNew {
                 go ForwardGossip(torCtrl, pm, origin, list)
@@ -182,7 +194,7 @@ func setupPublicRoutes(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *c
     })
 }
 
-func setupPrivateAPIs(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *chat.Manager, fileMgr *files.Manager, torCtrl *tor.Controller, profileMgr *identity.ProfileManager) {
+func setupPrivateAPIs(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *chat.Manager, fileMgr *files.Manager, torCtrl *tor.Controller, profileMgr *identity.ProfileManager, identityKey ed25519.PrivateKey) {
     mux.HandleFunc("/api/peers", func(w http.ResponseWriter, r *http.Request) {
         addr := ""
         if torCtrl.Onion != nil { addr = torCtrl.Onion.ID + ".onion" }
@@ -194,7 +206,7 @@ func setupPrivateAPIs(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *ch
         target := Sanitize(req.OnionAddress)
         if target != "" {
             pm.AddPeer(target, "direct", "", "", "")
-            go PerformHandshake(torCtrl, pm, target, chatMgr.GetMyPublicKey(), fileMgr, profileMgr.GetNickname())
+            go PerformHandshake(torCtrl, pm, target, chatMgr.GetMyPublicKey(), fileMgr, profileMgr.GetNickname(), identityKey)
         }
         w.Write([]byte("OK"))
     })
@@ -209,7 +221,7 @@ func setupPrivateAPIs(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *ch
         json.NewDecoder(r.Body).Decode(&req)
         msg := chat.Message{ID: fmt.Sprintf("%d", time.Now().UnixNano()), From: "me", To: req.To, Content: req.Content, Timestamp: time.Now(), Status: "pending"}
         chatMgr.SaveMessage(req.To, msg)
-        go AttemptSendMessage(torCtrl, pm, chatMgr, req.To, msg, profileMgr.GetNickname())
+        go AttemptSendMessage(torCtrl, pm, chatMgr, req.To, msg, profileMgr.GetNickname(), identityKey)
         w.Write([]byte("OK"))
     })
     mux.HandleFunc("/api/files/status", func(w http.ResponseWriter, r *http.Request) {

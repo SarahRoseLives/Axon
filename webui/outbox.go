@@ -6,88 +6,61 @@ import (
     "axon/files"
     "axon/tor"
     "bytes"
+    "crypto/ed25519" // Added
     "encoding/json"
     "fmt"
     "math"
-    "math/rand"
-    "sync"
     "time"
 )
 
-var NetworkMutex sync.Mutex
+var TorLimiter = make(chan struct{}, 3)
 
-// GOSSIP PARAMETERS
-const GossipFanout = 3 // Number of peers to infect per round
-
-func StartOutboxLoop(torCtrl *tor.Controller, pm *discovery.PeerManager, chatMgr *chat.Manager, fileMgr *files.Manager, getNickname func() string) {
-    // Chat Loop
+// Updated Signature to include Identity Key
+func StartOutboxLoop(torCtrl *tor.Controller, pm *discovery.PeerManager, chatMgr *chat.Manager, fileMgr *files.Manager, getNickname func() string, identityKey ed25519.PrivateKey) {
     go func() {
         for {
             time.Sleep(200 * time.Millisecond)
             if torCtrl.Onion == nil { continue }
+
             pendingMap := chatMgr.GetPendingMessages()
             if len(pendingMap) > 0 {
-                NetworkMutex.Lock()
                 for peerID, msgs := range pendingMap {
                     if len(msgs) > 0 {
-                        AttemptSendMessage(torCtrl, pm, chatMgr, peerID, msgs[0], getNickname())
+                        go func(pid string, m chat.Message) {
+                            TorLimiter <- struct{}{}
+                            AttemptSendMessage(torCtrl, pm, chatMgr, pid, m, getNickname(), identityKey)
+                            <-TorLimiter
+                        }(peerID, msgs[0])
                     }
                 }
-                NetworkMutex.Unlock()
             }
         }
     }()
 }
 
-// --- GOSSIP LOGIC ---
-
-// Helper: Selects N random peers
-func pickRandomPeers(peers []discovery.Peer, n int, excludeAddr string) []discovery.Peer {
-    // Filter exclusions first
-    var candidates []discovery.Peer
-    for _, p := range peers {
-        if p.OnionAddress != excludeAddr {
-            candidates = append(candidates, p)
-        }
-    }
-
-    // Shuffle
-    rand.Shuffle(len(candidates), func(i, j int) {
-        candidates[i], candidates[j] = candidates[j], candidates[i]
-    })
-
-    // Slice
-    if len(candidates) > n {
-        return candidates[:n]
-    }
-    return candidates
-}
-
-// Broadcasts MY files to a random subset
 func BroadcastToAll(torCtrl *tor.Controller, pm *discovery.PeerManager, localFiles []files.FileMetadata) {
     peers := pm.GetPeers()
     if len(peers) == 0 { return }
+    fmt.Printf("📢 Broadcasting manifest to %d neighbors...\n", len(peers))
 
-    targets := pickRandomPeers(peers, GossipFanout, "")
-
-    fmt.Printf("📢 Broadcasting manifest to %d random neighbors (Fanout)...\n", len(targets))
-
-    for _, p := range targets {
-        go BroadcastManifest(torCtrl, p.OnionAddress, localFiles, "")
+    for _, p := range peers {
+        go func(target string) {
+            TorLimiter <- struct{}{}
+            BroadcastManifest(torCtrl, target, localFiles, "")
+            <-TorLimiter
+        }(p.OnionAddress)
     }
 }
 
-// Forwards OTHERS' files to a random subset (Rumor Mongering)
 func ForwardGossip(torCtrl *tor.Controller, pm *discovery.PeerManager, origin string, manifest []files.FileMetadata) {
     peers := pm.GetPeers()
-
-    // Don't echo back to origin
-    targets := pickRandomPeers(peers, GossipFanout, origin)
-
-    fmt.Printf("🗣️  Gossip: Forwarding %s's library to %d random neighbors...\n", origin, len(targets))
-
-    for _, p := range targets {
-        go BroadcastManifest(torCtrl, p.OnionAddress, manifest, origin)
+    for _, p := range peers {
+        if p.OnionAddress == origin { continue }
+        go func(target string) {
+            TorLimiter <- struct{}{}
+            BroadcastManifest(torCtrl, target, manifest, origin)
+            <-TorLimiter
+        }(p.OnionAddress)
     }
 }
 
@@ -118,10 +91,7 @@ func BroadcastManifest(torCtrl *tor.Controller, target string, manifest []files.
 }
 
 func PerformDownload(torCtrl *tor.Controller, fileMgr *files.Manager, targetPeer, fileID, fileName string, size int64) {
-    if targetPeer == "" || fileID == "" {
-        fmt.Println("❌ Download Aborted: Missing ID")
-        return
-    }
+    if targetPeer == "" || fileID == "" { return }
 
     client, err := torCtrl.GetHttpClient()
     if err != nil { return }
@@ -129,15 +99,24 @@ func PerformDownload(torCtrl *tor.Controller, fileMgr *files.Manager, targetPeer
     chunkSize := int64(files.ChunkSize)
     totalChunks := int(math.Ceil(float64(size) / float64(chunkSize)))
 
-    fmt.Printf("⬇️ Queueing Download: %s from %s (%d chunks)\n", fileName, targetPeer, totalChunks)
     fileMgr.RegisterDownload(fileID, fileName, targetPeer, totalChunks)
+    fmt.Printf("⬇️ Queueing Download: %s from %s (%d chunks)\n", fileName, targetPeer, totalChunks)
 
     for i := 0; i < totalChunks; i++ {
-        NetworkMutex.Lock()
-        NetworkMutex.Unlock()
+        TorLimiter <- struct{}{}
 
         reqURL := fmt.Sprintf("http://%s/api/file/chunk?id=%s&idx=%d", targetPeer, fileID, i)
         resp, err := client.Get(reqURL)
+
+        var data []byte
+        if err == nil {
+            buf := new(bytes.Buffer)
+            buf.ReadFrom(resp.Body)
+            resp.Body.Close()
+            data = buf.Bytes()
+        }
+        <-TorLimiter
+
         if err != nil {
             fmt.Printf("❌ Chunk %d failed: %v\n", i, err)
             time.Sleep(3 * time.Second)
@@ -145,30 +124,31 @@ func PerformDownload(torCtrl *tor.Controller, fileMgr *files.Manager, targetPeer
             continue
         }
 
-        buf := new(bytes.Buffer)
-        buf.ReadFrom(resp.Body)
-        resp.Body.Close()
-        data := buf.Bytes()
-
         if len(data) < 100 && len(data) > 0 && data[0] == '{' {
-             fmt.Println("❌ Peer returned error:", string(data))
-             return
+            fmt.Println("❌ Error from peer:", string(data))
+            return
         }
 
         err = fileMgr.WriteChunk(fileID, fileName, i, totalChunks, data)
         if err != nil {
-            fmt.Printf("❌ Write error: %v\n", err)
+            fmt.Printf("❌ Disk Write error: %v\n", err)
             return
         }
-        time.Sleep(50 * time.Millisecond)
+        time.Sleep(100 * time.Millisecond)
     }
     fmt.Printf("🎉 Download Complete: %s\n", fileName)
 }
 
-func AttemptSendMessage(torCtrl *tor.Controller, pm *discovery.PeerManager, chatMgr *chat.Manager, targetPeer string, msg chat.Message, myNickname string) bool {
+// Updated signature + PerformHandshake call
+func AttemptSendMessage(torCtrl *tor.Controller, pm *discovery.PeerManager, chatMgr *chat.Manager, targetPeer string, msg chat.Message, myNickname string, privKey ed25519.PrivateKey) bool {
     peerKeyHex := pm.GetPublicKey(targetPeer)
     if peerKeyHex == "" {
-        go PerformHandshake(torCtrl, pm, targetPeer, chatMgr.GetMyPublicKey(), nil, myNickname)
+        go func() {
+            TorLimiter <- struct{}{}
+            // Pass nil for fileMgr to avoid re-syncing files on just a chat connection retry
+            PerformHandshake(torCtrl, pm, targetPeer, chatMgr.GetMyPublicKey(), nil, myNickname, privKey)
+            <-TorLimiter
+        }()
         return false
     }
 
@@ -176,10 +156,10 @@ func AttemptSendMessage(torCtrl *tor.Controller, pm *discovery.PeerManager, chat
     if err != nil { return false }
 
     wireMsg := chat.WireMessage{
-        ID: msg.ID,
-        From: torCtrl.Onion.ID + ".onion",
+        ID:         msg.ID,
+        From:       torCtrl.Onion.ID + ".onion",
         Ciphertext: ciphertext,
-        Nonce: nonce,
+        Nonce:      nonce,
     }
     jsonBytes, _ := json.Marshal(wireMsg)
 
@@ -200,9 +180,6 @@ func AttemptSendMessage(torCtrl *tor.Controller, pm *discovery.PeerManager, chat
 func AttemptSendFeedMessage(torCtrl *tor.Controller, pm *discovery.PeerManager, chatMgr *chat.Manager, content, myNickname string) {
     if torCtrl.Onion == nil { return }
 
-    NetworkMutex.Lock()
-    defer NetworkMutex.Unlock()
-
     client, err := torCtrl.GetHttpClient()
     if err != nil { return }
 
@@ -212,11 +189,12 @@ func AttemptSendFeedMessage(torCtrl *tor.Controller, pm *discovery.PeerManager, 
 
     peers := pm.GetPeers()
     for _, peer := range peers {
-        targetPeer := peer.OnionAddress
         go func(target string) {
+            TorLimiter <- struct{}{}
             resp, err := client.Post(fmt.Sprintf("http://%s/api/feed/recv", target), "application/json", bytes.NewBuffer(jsonBytes))
             if err == nil { resp.Body.Close() }
-        }(targetPeer)
+            <-TorLimiter
+        }(peer.OnionAddress)
     }
 
     localMsg := chat.Message{ID: msgID, From: torCtrl.Onion.ID + ".onion", To: "MESH", Content: content, Timestamp: time.Now()}
