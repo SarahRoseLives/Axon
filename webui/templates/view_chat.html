@@ -1,49 +1,43 @@
 {{ define "view_chat" }}
 <div id="view-chat" class="view-section hidden h-full flex">
-    <div class="w-64 border-r border-slate-800 bg-slate-900/30 hidden md:flex flex-col">
-        <div class="p-3 border-b border-slate-800">
-            <input type="text" placeholder="Search peers..." class="w-full bg-slate-900 border border-slate-700 rounded text-xs p-2 text-slate-200 placeholder-slate-600 focus:border-cyan-500 outline-none transition-colors">
+    <div class="w-64 border-r border-main bg-panel flex flex-col">
+        <div class="p-3 border-b border-main">
+            <input type="text" placeholder="Filter contacts..." class="text-sm bg-app">
         </div>
-
-        <div id="chat-peer-list" class="flex-1 overflow-y-auto">
-             <div class="p-4 text-xs text-slate-600 text-center italic">Loading contacts...</div>
+        <div id="chat-peer-list" class="flex-1 overflow-auto">
+             <div class="p-4 text-xs text-dim text-center italic mt-4">Loading contacts...</div>
         </div>
     </div>
 
-    <div class="flex-1 flex flex-col bg-slate-950">
-        <div id="chat-header" class="h-14 border-b border-slate-800 flex items-center px-6 justify-between bg-slate-900/20">
+    <div class="flex-1 flex flex-col bg-app">
+        <div class="h-16 border-b border-main flex items-center px-6 justify-between bg-panel">
             <div class="flex items-center gap-3">
-                <div class="w-2 h-2 rounded-full bg-slate-600" id="header-status-dot"></div>
-                <span id="active-chat-peer" class="font-mono text-slate-400">No Peer Selected</span>
+                <div class="w-2 h-2 rounded-full bg-border-main" id="header-status-dot"></div>
+                <div>
+                    <div id="active-chat-peer" class="text-sm font-bold text-bright">No Peer Selected</div>
+                </div>
             </div>
-
-            <div id="chat-actions" class="flex gap-2 opacity-50 hover:opacity-100 transition-opacity">
-                <button onclick="toggleBlockPeer()" title="Block/Unblock" class="p-2 hover:text-amber-500 transition-colors">
-                    <i data-lucide="ban" class="w-4 h-4"></i>
+            <div class="flex gap-2">
+                <button onclick="App.UI.blockPeer()" class="btn-icon" title="Block">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" class="icon w-4"><circle cx="12" cy="12" r="10"></circle><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line></svg>
                 </button>
-                <button onclick="deletePeer()" title="Delete Peer & History" class="p-2 hover:text-red-500 transition-colors">
-                    <i data-lucide="trash-2" class="w-4 h-4"></i>
+                <button onclick="App.UI.deletePeer()" class="btn-icon hover:text-red" title="Delete">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" class="icon w-4"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
                 </button>
             </div>
         </div>
 
-        <div id="chat-messages" class="flex-1 overflow-y-auto p-4 space-y-4">
-            <div class="flex justify-center mt-10 opacity-50">
-                <i data-lucide="message-square" class="w-12 h-12 text-slate-800"></i>
+        <div id="chat-messages" class="flex-1 overflow-auto p-6 space-y-4 flex flex-col">
+            <div class="flex justify-center mt-20 opacity-20">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" class="icon w-16 text-dim"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
             </div>
         </div>
 
-        <div class="p-4 border-t border-slate-800 bg-slate-900/20">
-            <form id="chat-form" class="flex gap-2" onsubmit="sendChat(event)">
-                <input
-                    id="chat-input"
-                    type="text"
-                    placeholder="Select a peer to chat..."
-                    class="flex-1 bg-slate-800 border-none rounded-md px-4 py-3 text-sm text-slate-200 focus:ring-1 focus:ring-cyan-500 outline-none"
-                    disabled
-                >
-                <button type="submit" id="chat-send-btn" class="bg-cyan-900 text-slate-500 p-3 rounded-md cursor-not-allowed" disabled>
-                    <i data-lucide="send" class="w-5 h-5"></i>
+        <div class="p-4 border-t border-main bg-panel">
+            <form class="flex gap-3" onsubmit="App.Chat.send(event)">
+                <input id="chat-input" type="text" placeholder="Select a peer to chat..." disabled class="bg-app border-main">
+                <button type="submit" id="chat-send-btn" class="btn btn-primary" disabled>
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" class="icon w-5"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
                 </button>
             </form>
         </div>

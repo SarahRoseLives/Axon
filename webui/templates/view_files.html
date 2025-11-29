@@ -1,37 +1,28 @@
 {{ define "view_files" }}
-<div id="view-files" class="view-section hidden h-full flex flex-col max-w-5xl mx-auto py-8 px-4 md:px-8">
-    <div class="flex justify-between items-end mb-6 border-b border-slate-800 pb-4">
+<div id="view-files" class="view-section hidden h-full flex flex-col p-4">
+    <div style="display: flex; justify-content: space-between; align-items: end; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 10px;">
         <div>
-            <h3 class="text-2xl font-bold text-slate-100">Library</h3>
-            <p class="text-slate-500 text-sm mt-1">Search locally cached indexes of peer files.</p>
+            <h3 style="color: white; font-weight: bold; font-size: 1.2em;">Library</h3>
+            <p style="color: var(--text-dim); font-size: 0.8em;">Search peer indexes.</p>
         </div>
-        <div class="flex gap-2">
-            <button onclick="refreshFiles()" class="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 px-3 py-1.5 rounded transition-colors border border-slate-700">
-                Rescan Shared Folder
-            </button>
+        <button onclick="App.Files.refresh()" class="btn-primary" style="background: transparent; border: 1px solid var(--border); font-size: 0.8em; padding: 5px 10px;">Rescan Folder</button>
+    </div>
+
+    <div style="margin-bottom: 20px; position: relative;">
+        <input type="text" id="file-search-input" onkeyup="App.Files.search(event)" placeholder="Search filename (Press Enter)..."
+               style="padding-left: 35px; background: var(--bg-card); border: 1px solid var(--border); color: var(--text-bright); width: 100%; border-radius: 4px; padding: 12px 12px 12px 40px;">
+        <div style="position: absolute; left: 12px; top: 12px; color: var(--text-dim);">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 16px; height: 16px;"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
         </div>
     </div>
 
-    <div class="mb-8">
-        <div class="relative">
-            <input type="text" id="file-search-input" onkeyup="searchFiles(event)" placeholder="Search filename..." class="w-full bg-slate-900 border border-slate-700 rounded-lg pl-10 pr-4 py-3 text-slate-200 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 outline-none">
-            <div class="absolute left-3 top-3.5 text-slate-500">
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" class="icon w-5 h-5"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-            </div>
-        </div>
+    <div id="transfer-container" class="hidden" style="margin-bottom: 20px;">
+        <h4 style="color: var(--text-dim); font-size: 0.7em; font-weight: bold; text-transform: uppercase; margin-bottom: 10px;">Active Transfers</h4>
+        <div id="transfer-list" style="display: flex; flex-direction: column; gap: 5px;"></div>
     </div>
 
-    <div id="transfer-container" class="mb-8 hidden">
-        <h4 class="text-xs font-bold text-slate-500 uppercase mb-3 tracking-wider">Active Transfers</h4>
-        <div id="transfer-list" class="space-y-2"></div>
-    </div>
-
-    <div class="flex-1 overflow-y-auto">
-        <div id="file-results" class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div class="col-span-full text-center mt-10 text-slate-600 text-sm">
-                Type above to search peer libraries...
-            </div>
-        </div>
+    <div id="file-results" class="flex-1" style="overflow: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; align-content: start;">
+        <div style="grid-column: 1 / -1; text-align: center; color: var(--text-dim); margin-top: 40px;">Type a filename and press Enter to search...</div>
     </div>
 </div>
 {{ end }}

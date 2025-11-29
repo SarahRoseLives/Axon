@@ -12,37 +12,38 @@ import (
     "time"
 )
 
-// --- TYPES ---
+const ChunkSize = 512 * 1024
 
 type FileMetadata struct {
-    ID          string    `json:"id"` // SHA256 Hash
+    ID          string    `json:"id"`
     Name        string    `json:"name"`
     Size        int64     `json:"size"`
     Type        string    `json:"type"`
-    Owner       string    `json:"owner"` // Onion Address
+    Owner       string    `json:"owner"`
     LastUpdated time.Time `json:"last_updated"`
 }
 
 type TransferStatus struct {
     FileID      string  `json:"file_id"`
     Name        string  `json:"name"`
-    Direction   string  `json:"direction"` // "upload" or "download"
+    Direction   string  `json:"direction"`
     PeerID      string  `json:"peer_id"`
-    Progress    float64 `json:"progress"` // 0.0 to 1.0
-    Status      string  `json:"status"`   // "active", "completed", "failed"
+    Progress    float64 `json:"progress"`
+    Status      string  `json:"status"`
     TotalChunks int     `json:"total_chunks"`
     SentChunks  int     `json:"sent_chunks"`
 }
 
-// --- MANAGER ---
-
 type Manager struct {
-    mu             sync.RWMutex
+    indexMu        sync.RWMutex
+    transferMu     sync.RWMutex
+
     SharedDir      string
     DataDir        string
-    LocalFiles     map[string]FileMetadata            // My files
-    RemoteIndex    map[string]map[string]FileMetadata // PeerID -> [FileID -> Meta]
-    ActiveTransfers map[string]*TransferStatus        // Key: FileID
+
+    LocalFiles     map[string]FileMetadata
+    RemoteIndex    map[string]map[string]FileMetadata
+    ActiveTransfers map[string]*TransferStatus
 }
 
 func NewManager(dataDir string) *Manager {
@@ -58,32 +59,41 @@ func NewManager(dataDir string) *Manager {
         RemoteIndex:     make(map[string]map[string]FileMetadata),
         ActiveTransfers: make(map[string]*TransferStatus),
     }
-    // Initial Scan
     fm.ScanSharedFolder()
     return fm
 }
 
-// --- INDEXING & SEARCH ---
+// --- NEW: REGISTER DOWNLOAD (Instant UI Feedback) ---
+func (m *Manager) RegisterDownload(fileID, name, peerID string, totalChunks int) {
+    m.transferMu.Lock()
+    defer m.transferMu.Unlock()
+
+    m.ActiveTransfers[fileID] = &TransferStatus{
+        FileID:      fileID,
+        Name:        name,
+        Direction:   "download",
+        PeerID:      peerID,
+        Status:      "pending",
+        TotalChunks: totalChunks,
+        SentChunks:  0,
+        Progress:    0.0,
+    }
+}
+
+// --- INDEXING ---
 
 func (m *Manager) ScanSharedFolder() {
-    m.mu.Lock()
-    defer m.mu.Unlock()
-
     files, _ := os.ReadDir(m.SharedDir)
-    m.LocalFiles = make(map[string]FileMetadata) // Reset
-
+    newMap := make(map[string]FileMetadata)
     for _, f := range files {
         if f.IsDir() { continue }
         info, _ := f.Info()
-
-        // Simple Hash: Name + Size (For speed, ideally read content)
-        // For production, we'd hash the first 1KB + size
         hashStr := fmt.Sprintf("%s-%d", info.Name(), info.Size())
         hasher := sha256.New()
         hasher.Write([]byte(hashStr))
         id := hex.EncodeToString(hasher.Sum(nil))[:16]
 
-        m.LocalFiles[id] = FileMetadata{
+        newMap[id] = FileMetadata{
             ID:          id,
             Name:        info.Name(),
             Size:        info.Size(),
@@ -92,12 +102,16 @@ func (m *Manager) ScanSharedFolder() {
             LastUpdated: time.Now(),
         }
     }
-    fmt.Printf("📂 Indexed %d local shared files\n", len(m.LocalFiles))
+    m.indexMu.Lock()
+    m.LocalFiles = newMap
+    count := len(m.LocalFiles)
+    m.indexMu.Unlock()
+    fmt.Printf("📂 Indexed %d local shared files\n", count)
 }
 
 func (m *Manager) GetLocalManifest() []FileMetadata {
-    m.mu.RLock()
-    defer m.mu.RUnlock()
+    m.indexMu.RLock()
+    defer m.indexMu.RUnlock()
     list := make([]FileMetadata, 0, len(m.LocalFiles))
     for _, f := range m.LocalFiles {
         list = append(list, f)
@@ -105,30 +119,37 @@ func (m *Manager) GetLocalManifest() []FileMetadata {
     return list
 }
 
-func (m *Manager) ProcessRemoteManifest(peerID string, files []FileMetadata) {
-    m.mu.Lock()
-    defer m.mu.Unlock()
+func (m *Manager) ProcessRemoteManifest(ownerID string, files []FileMetadata) bool {
+    m.indexMu.Lock()
+    defer m.indexMu.Unlock()
 
-    if _, ok := m.RemoteIndex[peerID]; !ok {
-        m.RemoteIndex[peerID] = make(map[string]FileMetadata)
+    ownerID = strings.TrimSpace(strings.ToLower(ownerID))
+    if _, ok := m.RemoteIndex[ownerID]; !ok {
+        m.RemoteIndex[ownerID] = make(map[string]FileMetadata)
     }
 
-    // Replace entries
-    m.RemoteIndex[peerID] = make(map[string]FileMetadata)
+    changed := false
+    currentMap := m.RemoteIndex[ownerID]
+
     for _, f := range files {
-        f.Owner = peerID // Enforce owner
-        m.RemoteIndex[peerID][f.ID] = f
+        f.Owner = ownerID
+        existing, exists := currentMap[f.ID]
+        if !exists || f.LastUpdated.After(existing.LastUpdated) {
+            currentMap[f.ID] = f
+            changed = true
+        }
     }
-    fmt.Printf("📚 Updated library: %s has %d files\n", peerID, len(files))
+    if changed {
+        fmt.Printf("📚 Library Update: Learned %d files from %s\n", len(files), ownerID)
+    }
+    return changed
 }
 
 func (m *Manager) Search(query string) []FileMetadata {
-    m.mu.RLock()
-    defer m.mu.RUnlock()
-
-    query = strings.ToLower(query)
+    m.indexMu.RLock()
+    defer m.indexMu.RUnlock()
+    query = strings.ToLower(strings.TrimSpace(query))
     var results []FileMetadata
-
     for _, peerFiles := range m.RemoteIndex {
         for _, f := range peerFiles {
             if strings.Contains(strings.ToLower(f.Name), query) {
@@ -141,12 +162,10 @@ func (m *Manager) Search(query string) []FileMetadata {
 
 // --- IO OPS ---
 
-const ChunkSize = 64 * 1024 // 64KB chunks for Tor
-
 func (m *Manager) GetChunk(fileID string, chunkIndex int) ([]byte, error) {
-    m.mu.RLock()
+    m.indexMu.RLock()
     meta, ok := m.LocalFiles[fileID]
-    m.mu.RUnlock()
+    m.indexMu.RUnlock()
 
     if !ok { return nil, fmt.Errorf("file not found") }
 
@@ -169,43 +188,50 @@ func (m *Manager) GetChunk(fileID string, chunkIndex int) ([]byte, error) {
 }
 
 func (m *Manager) WriteChunk(fileID, fileName string, chunkIndex int, totalChunks int, data []byte) error {
-    m.mu.Lock()
-    defer m.mu.Unlock()
+    // 1. Update Status (First, so we track progress even if write is slow)
+    m.transferMu.Lock()
 
-    dlPath := filepath.Join(m.DataDir, "downloads", fileName)
-
-    // Open file in Append/Write mode
-    f, err := os.OpenFile(dlPath, os.O_CREATE|os.O_WRONLY, 0644)
-    if err != nil { return err }
-    defer f.Close()
-
-    offset := int64(chunkIndex * ChunkSize)
-    _, err = f.Seek(offset, 0)
-    if err != nil { return err }
-
-    _, err = f.Write(data)
-
-    // Update Transfer Status
+    // Ensure struct exists (Backwards compatibility, though RegisterDownload should run first)
     if _, ok := m.ActiveTransfers[fileID]; !ok {
         m.ActiveTransfers[fileID] = &TransferStatus{
             FileID: fileID, Name: fileName, Direction: "download",
             Status: "active", TotalChunks: totalChunks,
         }
     }
+
     trans := m.ActiveTransfers[fileID]
-    trans.SentChunks++
-    trans.Progress = float64(trans.SentChunks) / float64(totalChunks)
+    trans.Status = "active" // Ensure it's marked active
+    trans.SentChunks++      // We count it as sent/received once we have the data
+
+    // Calculate progress
+    if totalChunks > 0 {
+        trans.Progress = float64(trans.SentChunks) / float64(totalChunks)
+    }
+
     if trans.SentChunks >= totalChunks {
         trans.Status = "completed"
         trans.Progress = 1.0
     }
+    m.transferMu.Unlock()
+
+    // 2. Perform Disk IO
+    dlPath := filepath.Join(m.DataDir, "downloads", fileName)
+    f, err := os.OpenFile(dlPath, os.O_CREATE|os.O_WRONLY, 0644)
+    if err != nil { return err }
+
+    offset := int64(chunkIndex * ChunkSize)
+    _, err = f.Seek(offset, 0)
+    if err == nil {
+        _, err = f.Write(data)
+    }
+    f.Close()
 
     return err
 }
 
 func (m *Manager) GetTransfers() []TransferStatus {
-    m.mu.RLock()
-    defer m.mu.RUnlock()
+    m.transferMu.RLock()
+    defer m.transferMu.RUnlock()
     var list []TransferStatus
     for _, t := range m.ActiveTransfers {
         list = append(list, *t)

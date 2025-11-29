@@ -1,42 +1,34 @@
 {{ define "view_identity" }}
-<div id="view-identity" class="view-section hidden max-w-3xl mx-auto p-8">
-    <div class="bg-slate-900/50 border border-slate-800 rounded-xl p-6 mb-6">
-        <div class="flex items-start justify-between mb-6">
+<div id="view-identity" class="view-section hidden h-full flex flex-col p-8 items-center">
+    <div class="card" style="width: 100%; max-width: 500px;">
+        <div style="display: flex; justify-content: space-between; margin-bottom: 20px;">
             <div>
-                <h3 class="text-xl font-medium text-white mb-1">Peer Identity</h3>
-                <p class="text-slate-500 text-sm">How you appear to others on the mesh.</p>
+                <h3 style="color: white; font-weight: bold;">Identity</h3>
+                <p style="color: var(--text-dim);">How you appear to others.</p>
             </div>
-            <div class="w-16 h-16 rounded-full bg-slate-800 border-2 border-cyan-500 flex items-center justify-center shadow-lg shadow-cyan-900/20">
-                <i data-lucide="user" class="w-8 h-8 text-cyan-500"></i>
+            <div style="width: 50px; height: 50px; border-radius: 50%; border: 2px solid var(--primary); display: flex; align-items: center; justify-content: center;">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" class="icon w-8" style="color: var(--primary);"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx="12" cy="7" r="4"></circle></svg>
             </div>
         </div>
 
-        <div class="space-y-4">
-            <div class="bg-black/30 p-4 rounded-lg border border-slate-800">
-                <label class="text-[10px] text-slate-500 uppercase tracking-widest block mb-2">Display Name</label>
-                <div class="flex gap-3">
-                    <input
-                        id="identity-nickname-input"
-                        type="text"
-                        value="{{ .Nickname }}"
-                        placeholder="Anonymous"
-                        class="flex-1 bg-slate-900 border border-slate-700 rounded-md px-3 py-2 text-sm text-cyan-400 focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 outline-none transition-all"
-                    >
-                    <button onclick="saveNickname()" class="bg-cyan-600 hover:bg-cyan-500 text-white px-6 py-2 rounded-md text-sm font-medium transition-colors shadow-lg shadow-cyan-900/20">
-                        Save
-                    </button>
+        <div class="flex-col gap-4" style="display: flex;">
+            <div>
+                <label style="color: var(--text-dim); font-size: 10px; font-weight: bold; display: block; margin-bottom: 5px;">DISPLAY NAME</label>
+                <div style="display: flex; gap: 10px;">
+                    <input id="identity-nickname-input" type="text" value="{{ .Nickname }}" placeholder="Anonymous" style="background: var(--bg-app); border: 1px solid var(--border);">
+                    <button onclick="App.UI.saveNick()" class="btn-primary">Save</button>
                 </div>
-                <p class="text-xs text-slate-600 mt-2">This name is shared with peers when you handshake.</p>
             </div>
 
-            <div class="bg-black/30 p-4 rounded-lg border border-slate-800 font-mono text-sm">
-                <label class="text-[10px] text-slate-500 uppercase tracking-widest block mb-1">Your Onion Address</label>
-                <div class="text-slate-400 break-all select-all">{{ .OnionAddr }}</div>
+            <div>
+                <label style="color: var(--text-dim); font-size: 10px; font-weight: bold; display: block; margin-bottom: 5px;">ONION ADDRESS</label>
+                <div style="background: var(--bg-app); border: 1px solid var(--border); padding: 10px; font-family: monospace; color: var(--text-muted); word-break: break-all; border-radius: 4px;">
+                    {{ .OnionAddr }}
+                </div>
             </div>
 
-            <div class="bg-black/30 p-4 rounded-lg border border-slate-800 font-mono text-sm">
-                <label class="text-[10px] text-slate-500 uppercase tracking-widest block mb-1">Client Version</label>
-                <div class="text-slate-600">{{ .AppVersion }}</div>
+            <div style="text-align: right; color: var(--text-dim); font-size: 10px;">
+                Version: {{ .AppVersion }}
             </div>
         </div>
     </div>
