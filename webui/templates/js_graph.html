@@ -1,0 +1,222 @@
+{{ define "js_graph" }}
+const Graph = {
+    nodes: [],
+    links: [],
+    transform: { x: 0, y: 0, k: 1 },
+    width: 0,
+    height: 0,
+    dragging: false,
+    lastX: 0,
+    lastY: 0,
+
+    init() {
+        const container = document.getElementById('topology-container');
+        if(!container) return;
+
+        this.updateSize();
+        this.transform.x = this.width / 2;
+        this.transform.y = this.height / 2;
+
+        new ResizeObserver(() => this.updateSize()).observe(container);
+
+        container.addEventListener('mousedown', e => {
+            this.dragging = true;
+            this.lastX = e.clientX;
+            this.lastY = e.clientY;
+            container.style.cursor = 'grabbing';
+        });
+        window.addEventListener('mouseup', () => {
+            this.dragging = false;
+            if(container) container.style.cursor = 'default';
+        });
+        container.addEventListener('mousemove', e => {
+            if(!this.dragging) return;
+            const dx = e.clientX - this.lastX;
+            const dy = e.clientY - this.lastY;
+            this.transform.x += dx;
+            this.transform.y += dy;
+            this.lastX = e.clientX;
+            this.lastY = e.clientY;
+            this.render();
+        });
+        container.addEventListener('wheel', e => {
+            e.preventDefault();
+            const scaleAmount = -e.deltaY * 0.001;
+            const newScale = Math.min(Math.max(0.2, this.transform.k * (1 + scaleAmount)), 4);
+            this.transform.k = newScale;
+            this.render();
+        });
+
+        requestAnimationFrame(() => this.tick());
+    },
+
+    updateSize() {
+        const container = document.getElementById('topology-container');
+        if(container) {
+            this.width = container.clientWidth;
+            this.height = container.clientHeight;
+        }
+    },
+
+    updateData(peers) {
+        const newNodes = [];
+        const newLinks = [];
+        const idMap = {};
+
+        // ME Node
+        let me = this.nodes.find(n => n.id === 'ME');
+        if(!me) me = { id: 'ME', x: 0, y: 0, vx: 0, vy: 0, fixed: true };
+        newNodes.push(me);
+        idMap['ME'] = me;
+
+        // Peer Nodes
+        peers.forEach(p => {
+            let node = this.nodes.find(n => n.id === p.onion_address);
+            if(!node) {
+                const angle = Math.random() * Math.PI * 2;
+                node = {
+                    id: p.onion_address,
+                    x: Math.cos(angle)*50,
+                    y: Math.sin(angle)*50,
+                    vx: 0, vy: 0,
+                    data: p
+                };
+            } else {
+                node.data = p;
+            }
+            newNodes.push(node);
+            idMap[p.onion_address] = node;
+        });
+
+        // Links
+        peers.forEach(p => {
+            let targetId = p.introduced_by ? p.introduced_by : 'ME';
+            if (!idMap[targetId]) targetId = 'ME';
+
+            if(idMap[targetId]) {
+                newLinks.push({
+                    source: idMap[p.onion_address],
+                    target: idMap[targetId],
+                    isOrphan: (targetId === 'ME' && p.introduced_by !== '')
+                });
+            }
+        });
+
+        this.nodes = newNodes;
+        this.links = newLinks;
+    },
+
+    tick() {
+        const REPULSION = 800;
+        const SPRING_LEN = 100;
+        const K_SPRING = 0.04;
+        const FRICTION = 0.92;
+        const CENTER_GRAVITY = 0.005;
+
+        for (let i = 0; i < this.nodes.length; i++) {
+            const a = this.nodes[i];
+            if(a.fixed) continue;
+
+            for (let j = 0; j < this.nodes.length; j++) {
+                if (i === j) continue;
+                const b = this.nodes[j];
+                const dx = a.x - b.x;
+                const dy = a.y - b.y;
+                let dist = Math.sqrt(dx*dx + dy*dy) || 1;
+                const force = REPULSION / (dist * dist);
+                a.vx += (dx / dist) * force;
+                a.vy += (dy / dist) * force;
+            }
+
+            a.vx -= a.x * CENTER_GRAVITY;
+            a.vy -= a.y * CENTER_GRAVITY;
+        }
+
+        this.links.forEach(link => {
+            const a = link.source;
+            const b = link.target;
+            const dx = a.x - b.x;
+            const dy = a.y - b.y;
+            const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+            const displacement = dist - SPRING_LEN;
+            const force = displacement * K_SPRING;
+            const fx = (dx / dist) * force;
+            const fy = (dy / dist) * force;
+
+            if(!a.fixed) { a.vx -= fx; a.vy -= fy; }
+            if(!b.fixed) { b.vx += fx; b.vy += fy; }
+        });
+
+        this.nodes.forEach(n => {
+            if(!n.fixed) {
+                n.vx *= FRICTION;
+                n.vy *= FRICTION;
+                n.x += n.vx;
+                n.y += n.vy;
+            }
+        });
+
+        this.render();
+        requestAnimationFrame(() => this.tick());
+    },
+
+    render() {
+        const nodesDiv = document.getElementById('topology-nodes');
+        const svg = document.getElementById('topology-svg');
+        if(!nodesDiv || !svg) return;
+
+        const { x: tx, y: ty, k: scale } = this.transform;
+
+        let svgHtml = '';
+        this.links.forEach(l => {
+            const x1 = l.source.x * scale + tx;
+            const y1 = l.source.y * scale + ty;
+            const x2 = l.target.x * scale + tx;
+            const y2 = l.target.y * scale + ty;
+
+            let color = 'var(--primary)';
+            let dash = '';
+
+            if(l.isOrphan) {
+                color = 'var(--text-dim)';
+                dash = 'stroke-dasharray="2,4"';
+            } else if (l.source.data && l.source.data.introduced_by) {
+                color = 'var(--warning)';
+                dash = 'stroke-dasharray="4,4"';
+            }
+
+            svgHtml += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="1" stroke-opacity="0.4" ${dash}/>`;
+        });
+        svg.innerHTML = svgHtml;
+
+        let nodesHtml = '';
+        this.nodes.forEach(n => {
+            const px = n.x * scale + tx;
+            const py = n.y * scale + ty;
+
+            if(n.fixed) {
+                nodesHtml += `
+                <div style="position:absolute; left:${px}px; top:${py}px; transform:translate(-50%, -50%); width:60px; height:60px; background:var(--bg-panel); border:2px solid var(--primary); border-radius:50%; display:flex; align-items:center; justify-content:center; z-index:10; box-shadow: 0 0 20px rgba(6,182,212,0.2);">
+                    ${Utils.icon('user', 'width:30px; height:30px; color:var(--primary);')}
+                </div>
+                <div style="position:absolute; left:${px}px; top:${py+40}px; transform:translateX(-50%); color:var(--primary); font-size:10px; font-weight:bold; letter-spacing:1px; background:rgba(0,0,0,0.8); padding:2px 4px; border-radius:4px;">YOU</div>`;
+            } else {
+                const status = Utils.getStatusColor(n.data);
+                const isDirect = !n.data.introduced_by;
+                const size = isDirect ? 40 : 32;
+                const icon = isDirect ? 'zap' : 'shield';
+
+                nodesHtml += `
+                <div title="${n.id}" onclick="App.Chat.open('${n.id}', '${n.data.nickname}')"
+                     style="position:absolute; left:${px}px; top:${py}px; transform:translate(-50%, -50%); width:${size}px; height:${size}px; background:var(--bg-panel); border:2px solid ${status}; border-radius:50%; display:flex; align-items:center; justify-content:center; cursor:pointer; z-index:10; box-shadow: 0 0 10px ${status}40;">
+                    <div style="color: ${status}">${Utils.icon(icon)}</div>
+                </div>
+                <div style="position:absolute; left:${px}px; top:${py + (size/2) + 5}px; transform:translateX(-50%); color:var(--text-dim); font-size:9px; background:rgba(0,0,0,0.8); padding:2px 4px; border-radius:4px; pointer-events:none; white-space:nowrap; z-index:11;">
+                    ${n.data.nickname || 'Peer'}
+                </div>`;
+            }
+        });
+        nodesDiv.innerHTML = nodesHtml;
+    }
+};
+{{ end }}
