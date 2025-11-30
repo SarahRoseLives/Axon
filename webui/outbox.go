@@ -10,6 +10,7 @@ import (
     "encoding/json"
     "fmt"
     "math"
+    "sync"
     "time"
 )
 
@@ -71,7 +72,6 @@ func BroadcastManifest(torCtrl *tor.Controller, target string, filter *files.Blo
     client, err := torCtrl.GetHttpClient()
     if err != nil { return }
 
-    // Use the payload structure defined in server.go (package webui shared)
     owner := torCtrl.Onion.ID + ".onion"
     if forceOwner != "" {
         owner = forceOwner
@@ -93,53 +93,134 @@ func BroadcastManifest(torCtrl *tor.Controller, target string, filter *files.Blo
     if err == nil { resp.Body.Close() }
 }
 
-func PerformDownload(torCtrl *tor.Controller, fileMgr *files.Manager, targetPeer, fileID, fileName string, size int64) {
-    if targetPeer == "" || fileID == "" { return }
+// PerformDownload - SWARM ENABLED & RESUMABLE
+func PerformDownload(torCtrl *tor.Controller, fileMgr *files.Manager, primaryPeer, fileID, fileName string, size int64) {
+    if fileID == "" { return }
 
-    client, err := torCtrl.GetHttpClient()
-    if err != nil { return }
+    // 1. Swarm Discovery
+    // Start with the peer we know has it, then ask the Manager who else matches the Bloom Filter
+    swarm := []string{primaryPeer}
+    potentialOwners := fileMgr.GetOwners(fileName)
+
+    // Dedup map
+    seen := map[string]bool{primaryPeer: true}
+    for _, p := range potentialOwners {
+        if !seen[p] && p != "" {
+            swarm = append(swarm, p)
+            seen[p] = true
+        }
+    }
 
     chunkSize := int64(files.ChunkSize)
     totalChunks := int(math.Ceil(float64(size) / float64(chunkSize)))
 
-    fileMgr.RegisterDownload(fileID, fileName, targetPeer, totalChunks)
-    fmt.Printf("⬇️ Queueing Download: %s from %s (%d chunks)\n", fileName, targetPeer, totalChunks)
+    // Initialize State (Load from disk if resume)
+    fileMgr.RegisterDownload(fileID, fileName, primaryPeer, totalChunks)
+    fmt.Printf("🐝 Starting Swarm Download: %s\n", fileName)
+    fmt.Printf("👥 Swarm Size: %d peers %v\n", len(swarm), swarm)
 
+    // 2. Job Queue Setup
+    // Buffered channel to hold all needed chunks
+    jobs := make(chan int, totalChunks)
+
+    // Fill queue only with missing chunks (Resume Logic)
+    chunksNeeded := 0
     for i := 0; i < totalChunks; i++ {
-        TorLimiter <- struct{}{}
-
-        reqURL := fmt.Sprintf("http://%s/api/file/chunk?id=%s&idx=%d", targetPeer, fileID, i)
-        resp, err := client.Get(reqURL)
-
-        var data []byte
-        if err == nil {
-            buf := new(bytes.Buffer)
-            buf.ReadFrom(resp.Body)
-            resp.Body.Close()
-            data = buf.Bytes()
+        if !fileMgr.IsChunkComplete(fileID, i) {
+            jobs <- i
+            chunksNeeded++
         }
-        <-TorLimiter
-
-        if err != nil {
-            fmt.Printf("❌ Chunk %d failed: %v\n", i, err)
-            time.Sleep(3 * time.Second)
-            i--
-            continue
-        }
-
-        if len(data) < 100 && len(data) > 0 && data[0] == '{' {
-            fmt.Println("❌ Error from peer:", string(data))
-            return
-        }
-
-        err = fileMgr.WriteChunk(fileID, fileName, i, totalChunks, data)
-        if err != nil {
-            fmt.Printf("❌ Disk Write error: %v\n", err)
-            return
-        }
-        time.Sleep(100 * time.Millisecond)
     }
-    fmt.Printf("🎉 Download Complete: %s\n", fileName)
+
+    if chunksNeeded == 0 {
+        fmt.Printf("🎉 Download %s is already complete.\n", fileName)
+        return
+    }
+
+    // 3. Worker Pool Setup
+    var wg sync.WaitGroup
+    client, err := torCtrl.GetHttpClient()
+    if err != nil { return }
+
+    // Spawn one worker per peer in the swarm
+    for _, peer := range swarm {
+        wg.Add(1)
+        go func(p string) {
+            defer wg.Done()
+
+            // Consume jobs
+            for chunkIdx := range jobs {
+                // Double check if done (race condition safeguard)
+                if fileMgr.IsChunkComplete(fileID, chunkIdx) {
+                    continue
+                }
+
+                // Rate Limit
+                TorLimiter <- struct{}{}
+
+                reqURL := fmt.Sprintf("http://%s/api/file/chunk?id=%s&idx=%d", p, fileID, chunkIdx)
+                resp, err := client.Get(reqURL)
+
+                var data []byte
+                if err == nil {
+                    buf := new(bytes.Buffer)
+                    buf.ReadFrom(resp.Body)
+                    resp.Body.Close()
+                    data = buf.Bytes()
+                }
+
+                // Release Token
+                <-TorLimiter
+
+                // Validation
+                if err != nil || len(data) == 0 {
+                    fmt.Printf("⚠️ Peer %s failed chunk %d: %v\n", p, chunkIdx, err)
+
+                    // RE-QUEUE STRATEGY
+                    // Put the job back for another worker to pick up
+                    go func() { jobs <- chunkIdx }()
+
+                    // Sleep briefly to avoid hammering a failing peer
+                    time.Sleep(2 * time.Second)
+                    continue
+                }
+
+                // Write to Disk
+                err = fileMgr.WriteChunk(fileID, fileName, chunkIdx, totalChunks, data)
+                if err != nil {
+                    fmt.Printf("❌ Disk Error: %v\n", err)
+                    // If disk fails, we probably can't continue safely
+                    return
+                }
+            }
+        }(peer)
+    }
+
+    // 4. Completion Monitor
+    // We need to close the 'jobs' channel when all chunks are physically written to disk.
+    // Since workers re-queue failed jobs, we can't just close 'jobs' when empty.
+    // We poll the file manager status.
+
+    ticker := time.NewTicker(1 * time.Second)
+    defer ticker.Stop()
+
+    for range ticker.C {
+        allDone := true
+        for i := 0; i < totalChunks; i++ {
+            if !fileMgr.IsChunkComplete(fileID, i) {
+                allDone = false
+                break
+            }
+        }
+
+        if allDone {
+            close(jobs) // Signal workers to exit
+            break
+        }
+    }
+
+    wg.Wait()
+    fmt.Printf("🎉 Swarm Download Complete: %s\n", fileName)
 }
 
 func AttemptSendMessage(torCtrl *tor.Controller, pm *discovery.PeerManager, chatMgr *chat.Manager, targetPeer string, msg chat.Message, myNickname string, privKey ed25519.PrivateKey) bool {
@@ -147,7 +228,6 @@ func AttemptSendMessage(torCtrl *tor.Controller, pm *discovery.PeerManager, chat
     if peerKeyHex == "" {
         go func() {
             TorLimiter <- struct{}{}
-            // Pass nil for fileMgr to avoid re-syncing files on just a chat connection retry
             PerformHandshake(torCtrl, pm, targetPeer, chatMgr.GetMyPublicKey(), nil, myNickname, privKey)
             <-TorLimiter
         }()
