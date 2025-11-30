@@ -87,7 +87,7 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager, identit
             onion = torCtrl.Onion.ID + ".onion"
         }
         data := UIContext{
-            AppVersion:  "0.9.36 (Sig Fix)",
+            AppVersion:  "0.9.37 (Secure)",
             OnionAddr:   onion,
             Status:      status,
             Peers:       pm.GetPeers(),
@@ -109,12 +109,17 @@ func setupPublicRoutes(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *c
         if r.Method != http.MethodPost { return }
         var req HandshakeRequest
         json.NewDecoder(r.Body).Decode(&req)
-        from := Sanitize(req.OnionAddress)
-        if from == "" || pm.IsBlocked(from) { return }
 
-        // --- FIX: VERIFY WITH IDENTITY KEY ---
+        // --- SECURITY: Strict Onion Check ---
+        from := Sanitize(req.OnionAddress)
+        // If Sanitize returns empty, it's a blocked/invalid address.
+        if from == "" || pm.IsBlocked(from) {
+            fmt.Println("⚠️ Rejected Handshake: Invalid Address or Blocked")
+            return
+        }
+
+        // Verify Identity Signature
         validSig := false
-        // We verify using the Identity Key they provided (req.IdentityKey)
         if req.IdentityKey != "" && req.Signature != "" {
             if identity.Verify(req.IdentityKey, []byte(req.Nickname), req.Signature) {
                 validSig = true
@@ -144,7 +149,11 @@ func setupPublicRoutes(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *c
         if r.Method != http.MethodPost { return }
         var wire chat.WireMessage
         json.NewDecoder(r.Body).Decode(&wire)
+
+        // --- SECURITY: Strict Onion Check ---
         from := Sanitize(wire.From)
+        if from == "" { return }
+
         key := pm.GetPublicKey(from)
         if key == "" { return }
         txt, _ := chatMgr.Decrypt(key, wire.Ciphertext, wire.Nonce)
@@ -164,7 +173,10 @@ func setupPublicRoutes(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *c
         var list []files.FileMetadata
         if err := json.NewDecoder(r.Body).Decode(&list); err != nil { return }
         if len(list) > 0 {
-            origin := list[0].Owner
+            // --- SECURITY: Strict Onion Check ---
+            origin := Sanitize(list[0].Owner)
+            if origin == "" { return }
+
             didLearnNew := fileMgr.ProcessRemoteManifest(origin, list)
             if didLearnNew {
                 go ForwardGossip(torCtrl, pm, origin, list)
@@ -185,7 +197,11 @@ func setupPublicRoutes(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *c
         if r.Method != http.MethodPost { return }
         var wireMsg chat.WireFeedMessage
         json.NewDecoder(r.Body).Decode(&wireMsg)
+
+        // --- SECURITY: Strict Onion Check ---
         from := Sanitize(wireMsg.From)
+        if from == "" { return }
+
         if pm.IsBlocked(from) { return }
         msgID := fmt.Sprintf("%d-%s", time.Now().UnixNano(), wireMsg.Nonce)
         msg := chat.Message{ID: msgID, From: from, To: "MESH", Content: wireMsg.Content, Timestamp: time.Now()}
@@ -200,16 +216,24 @@ func setupPrivateAPIs(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *ch
         if torCtrl.Onion != nil { addr = torCtrl.Onion.ID + ".onion" }
         json.NewEncoder(w).Encode(map[string]interface{}{"self": addr, "peers": pm.GetPeers()})
     })
+
+    // UI: Add Peer Manually
     mux.HandleFunc("/api/peers/add", func(w http.ResponseWriter, r *http.Request) {
         var req struct{ OnionAddress string `json:"onion_address"` }
         json.NewDecoder(r.Body).Decode(&req)
+
+        // --- SECURITY: Strict Onion Check ---
         target := Sanitize(req.OnionAddress)
+
         if target != "" {
             pm.AddPeer(target, "direct", "", "", "")
             go PerformHandshake(torCtrl, pm, target, chatMgr.GetMyPublicKey(), fileMgr, profileMgr.GetNickname(), identityKey)
+            w.Write([]byte("OK"))
+        } else {
+            http.Error(w, "Invalid Onion Address", 400)
         }
-        w.Write([]byte("OK"))
     })
+
     mux.HandleFunc("/api/chat/status", func(w http.ResponseWriter, r *http.Request) {
         json.NewEncoder(w).Encode(chatMgr.GetStatusList())
     })
@@ -219,9 +243,13 @@ func setupPrivateAPIs(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *ch
     mux.HandleFunc("/api/chat/send", func(w http.ResponseWriter, r *http.Request) {
         var req struct { To, Content string }
         json.NewDecoder(r.Body).Decode(&req)
-        msg := chat.Message{ID: fmt.Sprintf("%d", time.Now().UnixNano()), From: "me", To: req.To, Content: req.Content, Timestamp: time.Now(), Status: "pending"}
-        chatMgr.SaveMessage(req.To, msg)
-        go AttemptSendMessage(torCtrl, pm, chatMgr, req.To, msg, profileMgr.GetNickname(), identityKey)
+
+        to := Sanitize(req.To) // Sanitize output too just in case
+        if to == "" { return }
+
+        msg := chat.Message{ID: fmt.Sprintf("%d", time.Now().UnixNano()), From: "me", To: to, Content: req.Content, Timestamp: time.Now(), Status: "pending"}
+        chatMgr.SaveMessage(to, msg)
+        go AttemptSendMessage(torCtrl, pm, chatMgr, to, msg, profileMgr.GetNickname(), identityKey)
         w.Write([]byte("OK"))
     })
     mux.HandleFunc("/api/files/status", func(w http.ResponseWriter, r *http.Request) {
@@ -238,8 +266,12 @@ func setupPrivateAPIs(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *ch
             Size     int64  `json:"size"`
         }
         json.NewDecoder(r.Body).Decode(&req)
-        fmt.Printf("📥 Download Request: %s from %s\n", req.FileName, req.PeerID)
-        go PerformDownload(torCtrl, fileMgr, req.PeerID, req.FileID, req.FileName, req.Size)
+
+        peerID := Sanitize(req.PeerID)
+        if peerID == "" { return }
+
+        fmt.Printf("📥 Download Request: %s from %s\n", req.FileName, peerID)
+        go PerformDownload(torCtrl, fileMgr, peerID, req.FileID, req.FileName, req.Size)
         w.Write([]byte("OK"))
     })
     mux.HandleFunc("/api/files/refresh", func(w http.ResponseWriter, r *http.Request) {
