@@ -13,7 +13,7 @@ import (
     "time"
 )
 
-var TorLimiter = make(chan struct{}, 3)
+var TorLimiter = make(chan struct{}, 5)
 
 // Updated Signature to include Identity Key
 func StartOutboxLoop(torCtrl *tor.Controller, pm *discovery.PeerManager, chatMgr *chat.Manager, fileMgr *files.Manager, getNickname func() string, identityKey ed25519.PrivateKey) {
