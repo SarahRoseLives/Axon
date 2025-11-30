@@ -14,8 +14,16 @@ import (
     "log"
     "net/http"
     "strconv"
+    "sync"
     "time"
 )
+
+// ManifestPayload wraps the Bloom Filter with ownership info
+// Shared by outbox.go and server.go
+type ManifestPayload struct {
+    Owner  string             `json:"owner"`
+    Filter *files.BloomFilter `json:"filter"`
+}
 
 type UIContext struct {
     AppVersion   string
@@ -86,8 +94,10 @@ func Start(port int, torCtrl *tor.Controller, pm *discovery.PeerManager, identit
             status = "Online"
             onion = torCtrl.Onion.ID + ".onion"
         }
+        // Using "SharedCount" to represent Local Files now,
+        // as we don't store remote counts easily with Bloom Filters
         data := UIContext{
-            AppVersion:  "0.9.37 (Secure)",
+            AppVersion:  "0.9.37 (Bloom+Secure)",
             OnionAddr:   onion,
             Status:      status,
             Peers:       pm.GetPeers(),
@@ -112,13 +122,9 @@ func setupPublicRoutes(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *c
 
         // --- SECURITY: Strict Onion Check ---
         from := Sanitize(req.OnionAddress)
-        // If Sanitize returns empty, it's a blocked/invalid address.
-        if from == "" || pm.IsBlocked(from) {
-            fmt.Println("⚠️ Rejected Handshake: Invalid Address or Blocked")
-            return
-        }
+        if from == "" || pm.IsBlocked(from) { return }
 
-        // Verify Identity Signature
+        // Verify Identity
         validSig := false
         if req.IdentityKey != "" && req.Signature != "" {
             if identity.Verify(req.IdentityKey, []byte(req.Nickname), req.Signature) {
@@ -168,21 +174,32 @@ func setupPublicRoutes(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *c
         w.Write([]byte("OK"))
     })
 
+    // RECEIVE BLOOM FILTER MANIFEST
     mux.HandleFunc("/api/file/manifest", func(w http.ResponseWriter, r *http.Request) {
         if r.Method != http.MethodPost { return }
-        var list []files.FileMetadata
-        if err := json.NewDecoder(r.Body).Decode(&list); err != nil { return }
-        if len(list) > 0 {
-            // --- SECURITY: Strict Onion Check ---
-            origin := Sanitize(list[0].Owner)
-            if origin == "" { return }
+        var payload ManifestPayload
+        if err := json.NewDecoder(r.Body).Decode(&payload); err != nil { return }
 
-            didLearnNew := fileMgr.ProcessRemoteManifest(origin, list)
-            if didLearnNew {
-                go ForwardGossip(torCtrl, pm, origin, list)
-            }
+        // --- SECURITY: Strict Onion Check ---
+        origin := Sanitize(payload.Owner)
+        if origin == "" { return }
+
+        if payload.Filter != nil {
+            fileMgr.ProcessRemoteFilter(origin, payload.Filter)
+
+            // Note: Forwarding disabled for full mesh to prevent loops/floods in this version.
+            // go ForwardGossip(torCtrl, pm, origin, payload.Filter)
         }
         w.Write([]byte("OK"))
+    })
+
+    // ACTIVE QUERY ENDPOINT: Neighbors call this to search OUR files
+    mux.HandleFunc("/api/file/query", func(w http.ResponseWriter, r *http.Request) {
+        q := r.URL.Query().Get("q")
+        if q == "" { return }
+
+        results := fileMgr.LocalQuery(q)
+        json.NewEncoder(w).Encode(results)
     })
 
     mux.HandleFunc("/api/file/chunk", func(w http.ResponseWriter, r *http.Request) {
@@ -217,14 +234,11 @@ func setupPrivateAPIs(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *ch
         json.NewEncoder(w).Encode(map[string]interface{}{"self": addr, "peers": pm.GetPeers()})
     })
 
-    // UI: Add Peer Manually
     mux.HandleFunc("/api/peers/add", func(w http.ResponseWriter, r *http.Request) {
         var req struct{ OnionAddress string `json:"onion_address"` }
         json.NewDecoder(r.Body).Decode(&req)
 
-        // --- SECURITY: Strict Onion Check ---
         target := Sanitize(req.OnionAddress)
-
         if target != "" {
             pm.AddPeer(target, "direct", "", "", "")
             go PerformHandshake(torCtrl, pm, target, chatMgr.GetMyPublicKey(), fileMgr, profileMgr.GetNickname(), identityKey)
@@ -244,7 +258,7 @@ func setupPrivateAPIs(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *ch
         var req struct { To, Content string }
         json.NewDecoder(r.Body).Decode(&req)
 
-        to := Sanitize(req.To) // Sanitize output too just in case
+        to := Sanitize(req.To)
         if to == "" { return }
 
         msg := chat.Message{ID: fmt.Sprintf("%d", time.Now().UnixNano()), From: "me", To: to, Content: req.Content, Timestamp: time.Now(), Status: "pending"}
@@ -252,12 +266,66 @@ func setupPrivateAPIs(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *ch
         go AttemptSendMessage(torCtrl, pm, chatMgr, to, msg, profileMgr.GetNickname(), identityKey)
         w.Write([]byte("OK"))
     })
+
     mux.HandleFunc("/api/files/status", func(w http.ResponseWriter, r *http.Request) {
         json.NewEncoder(w).Encode(fileMgr.GetTransfers())
     })
+
+    // --- UPDATED SEARCH LOGIC (Bloom + Active Query) ---
     mux.HandleFunc("/api/files/search", func(w http.ResponseWriter, r *http.Request) {
-        json.NewEncoder(w).Encode(fileMgr.Search(r.URL.Query().Get("q")))
+        query := r.URL.Query().Get("q")
+        if query == "" { return }
+
+        // 1. Check Filters: Who *might* have it?
+        candidates := fileMgr.SearchFilters(query)
+
+        // 2. Ask Candidates (Concurrent Queries)
+        resultsChan := make(chan []files.FileMetadata, len(candidates))
+        var wg sync.WaitGroup
+
+        client, err := torCtrl.GetHttpClient()
+        if err != nil {
+            http.Error(w, "Tor not ready", 500)
+            return
+        }
+
+        // Limit concurrent outbound searches to prevent choking
+        sem := make(chan struct{}, 5)
+
+        for _, peer := range candidates {
+            wg.Add(1)
+            go func(p string) {
+                defer wg.Done()
+                sem <- struct{}{}
+                defer func() { <-sem }()
+
+                resp, err := client.Get(fmt.Sprintf("http://%s/api/file/query?q=%s", p, query))
+                if err == nil && resp.StatusCode == 200 {
+                    var remoteFiles []files.FileMetadata
+                    if json.NewDecoder(resp.Body).Decode(&remoteFiles) == nil {
+                        for i := range remoteFiles {
+                            remoteFiles[i].Owner = p // Tag results with owner
+                        }
+                        resultsChan <- remoteFiles
+                    }
+                    resp.Body.Close()
+                }
+            }(peer)
+        }
+
+        go func() {
+            wg.Wait()
+            close(resultsChan)
+        }()
+
+        var aggregated []files.FileMetadata
+        for res := range resultsChan {
+            aggregated = append(aggregated, res...)
+        }
+
+        json.NewEncoder(w).Encode(aggregated)
     })
+
     mux.HandleFunc("/api/files/download", func(w http.ResponseWriter, r *http.Request) {
         var req struct {
             PeerID   string `json:"peer_id"`
@@ -274,11 +342,13 @@ func setupPrivateAPIs(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *ch
         go PerformDownload(torCtrl, fileMgr, peerID, req.FileID, req.FileName, req.Size)
         w.Write([]byte("OK"))
     })
+
     mux.HandleFunc("/api/files/refresh", func(w http.ResponseWriter, r *http.Request) {
         fileMgr.ScanSharedFolder()
         go BroadcastToAll(torCtrl, pm, fileMgr.GetLocalManifest())
         w.Write([]byte("OK"))
     })
+
     mux.HandleFunc("/api/feed/history", func(w http.ResponseWriter, r *http.Request) {
         json.NewEncoder(w).Encode(chatMgr.GetFeedHistory())
     })
@@ -290,6 +360,7 @@ func setupPrivateAPIs(mux *http.ServeMux, pm *discovery.PeerManager, chatMgr *ch
         }
         w.Write([]byte("OK"))
     })
+
     mux.HandleFunc("/api/identity", func(w http.ResponseWriter, r *http.Request) {
         if r.Method == "POST" {
             var req struct{ Nickname string `json:"nickname"` }

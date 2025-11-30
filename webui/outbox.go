@@ -6,7 +6,7 @@ import (
     "axon/files"
     "axon/tor"
     "bytes"
-    "crypto/ed25519" // Added
+    "crypto/ed25519"
     "encoding/json"
     "fmt"
     "math"
@@ -15,7 +15,6 @@ import (
 
 var TorLimiter = make(chan struct{}, 5)
 
-// Updated Signature to include Identity Key
 func StartOutboxLoop(torCtrl *tor.Controller, pm *discovery.PeerManager, chatMgr *chat.Manager, fileMgr *files.Manager, getNickname func() string, identityKey ed25519.PrivateKey) {
     go func() {
         for {
@@ -38,53 +37,57 @@ func StartOutboxLoop(torCtrl *tor.Controller, pm *discovery.PeerManager, chatMgr
     }()
 }
 
-func BroadcastToAll(torCtrl *tor.Controller, pm *discovery.PeerManager, localFiles []files.FileMetadata) {
+// BroadcastToAll sends our Bloom Filter to all neighbors
+func BroadcastToAll(torCtrl *tor.Controller, pm *discovery.PeerManager, filter *files.BloomFilter) {
     peers := pm.GetPeers()
     if len(peers) == 0 { return }
-    fmt.Printf("📢 Broadcasting manifest to %d neighbors...\n", len(peers))
+    fmt.Printf("📢 Broadcasting Bloom Filter to %d neighbors...\n", len(peers))
 
     for _, p := range peers {
         go func(target string) {
             TorLimiter <- struct{}{}
-            BroadcastManifest(torCtrl, target, localFiles, "")
+            BroadcastManifest(torCtrl, target, filter, "")
             <-TorLimiter
         }(p.OnionAddress)
     }
 }
 
-func ForwardGossip(torCtrl *tor.Controller, pm *discovery.PeerManager, origin string, manifest []files.FileMetadata) {
+// ForwardGossip propagates a Bloom Filter update to others
+func ForwardGossip(torCtrl *tor.Controller, pm *discovery.PeerManager, origin string, filter *files.BloomFilter) {
     peers := pm.GetPeers()
     for _, p := range peers {
         if p.OnionAddress == origin { continue }
         go func(target string) {
             TorLimiter <- struct{}{}
-            BroadcastManifest(torCtrl, target, manifest, origin)
+            BroadcastManifest(torCtrl, target, filter, origin)
             <-TorLimiter
         }(p.OnionAddress)
     }
 }
 
-func BroadcastManifest(torCtrl *tor.Controller, target string, manifest []files.FileMetadata, forceOwner string) {
+func BroadcastManifest(torCtrl *tor.Controller, target string, filter *files.BloomFilter, forceOwner string) {
+    if filter == nil { return }
+
     client, err := torCtrl.GetHttpClient()
     if err != nil { return }
 
-    finalManifest := make([]files.FileMetadata, len(manifest))
-    myAddr := torCtrl.Onion.ID + ".onion"
-
-    for i, f := range manifest {
-        if forceOwner == "" {
-            f.Owner = myAddr
-        } else {
-            f.Owner = forceOwner
-        }
-        finalManifest[i] = f
+    // Use the payload structure defined in server.go (package webui shared)
+    owner := torCtrl.Onion.ID + ".onion"
+    if forceOwner != "" {
+        owner = forceOwner
     }
 
-    payload, _ := json.Marshal(finalManifest)
+    payload := ManifestPayload{
+        Owner:  owner,
+        Filter: filter,
+    }
+
+    jsonBytes, _ := json.Marshal(payload)
+
     resp, err := client.Post(
         fmt.Sprintf("http://%s/api/file/manifest", target),
         "application/json",
-        bytes.NewBuffer(payload),
+        bytes.NewBuffer(jsonBytes),
     )
 
     if err == nil { resp.Body.Close() }
@@ -139,7 +142,6 @@ func PerformDownload(torCtrl *tor.Controller, fileMgr *files.Manager, targetPeer
     fmt.Printf("🎉 Download Complete: %s\n", fileName)
 }
 
-// Updated signature + PerformHandshake call
 func AttemptSendMessage(torCtrl *tor.Controller, pm *discovery.PeerManager, chatMgr *chat.Manager, targetPeer string, msg chat.Message, myNickname string, privKey ed25519.PrivateKey) bool {
     peerKeyHex := pm.GetPublicKey(targetPeer)
     if peerKeyHex == "" {
