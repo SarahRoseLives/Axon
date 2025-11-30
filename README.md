@@ -1,83 +1,94 @@
 AXON // Mesh Network
 
-AXON is a decentralized, serverless messenger built on Tor Onion Services. It creates a private, encrypted mesh network between you and your trusted peers. There are no central servers, no phone numbers, and no metadata leaks.
+v0.9.37-alpha
+
+AXON is a decentralized, serverless P2P mesh built on Tor Hidden Services. It creates a private, encrypted network between you and your trusted peers, designed for high-latency, unreliable network environments.
+
+There are no central servers, no phone numbers, and no metadata leaks.
 
 🛡️ Key Features
 
-    Tor-Native: Every node is a Hidden Service (.onion). Connections are anonymous and NAT-punching is automatic.
+```
+Tor-Native: Every node is a Hidden Service (v3 .onion). Connections are end-to-end encrypted, anonymous, and NAT-punching is automatic.
 
-    Trust Graph: A visual topology map showing your direct neighbors and the peers they know (transitive trust).
+Swarm Downloading: Axon aggregates bandwidth from multiple peers. If 5 friends have a file, you download chunks from all 5 simultaneously, maximizing speed over Tor.
 
-    End-to-End Encrypted: All messages are secured using X25519 key exchange and AES-256-GCM.
+Smart Resume: Network drops are expected. Transfers utilize persistent state files (.axon_state), allowing downloads to resume instantly—even after a full system restart.
 
-    Store & Forward: Messages sent to offline peers are queued locally and auto-delivered when they return online.
+Bloom Filter Indexing: Instead of exchanging massive file lists, nodes exchange bandwidth-efficient probabilistic filters (64KB). This allows libraries of 100,000+ files to be searchable without clogging the mesh.
 
-    Gossip Discovery: Your node automatically learns about "friends of friends," expanding your network organically.
+Trust Graph: A visual, force-directed topology map showing your direct neighbors and the peers they know.
+```
 
 🚀 Getting Started
 
 1. Run the Node
 
-Start the application. It will automatically launch a local Tor instance and bind the Web UI to port 8080.
-Bash
+Axon ships as a single static binary. It manages its own Tor daemon.
+
+
+# Start the node (binds Web UI to localhost:8080)
 
 ./axon
 
-To run multiple instances on the same machine (for testing), use the port flag:
-Bash
+# Run a second instance on the same machine for testing
 
-./axon -port 8080
+./axon -port 8081
 
 2. Access the Interface
 
-Open your browser and navigate to: http://127.0.0.1:8080
+Open your browser and navigate to: [http://127.0.0.1:8081](http://127.0.0.1:8081)
 
 📖 User Guide
 
 1. Identity Setup
 
-    Go to the Identity tab.
+   Go to the Identity tab.
 
-    Set a Display Name (e.g., "Ghost"). This is how you will appear to others.
+   Set a Display Name (e.g., "Ghost").
 
-    Copy your Onion Address (e.g., pnkt...tqd.onion). This is your permanent ID.
+   Copy your Onion Address (e.g., pnkt...tqd.onion). This is your permanent, sovereign ID.
 
-2. Adding a Peer
+2. Building Your Mesh
 
-    Go to the Topology tab.
+   Go to the Topology tab.
 
-    Click the User Plus (+) icon in the top right.
+   Click the Add Peer (+) icon.
 
-    Paste your friend's Onion Address.
+   Paste a friend's Onion Address.
 
-    Wait. The initial handshake takes 30-60 seconds while Tor builds a circuit.
+   Note: The initial handshake takes 30–60 seconds while Tor builds the circuit. Once connected, they appear on your map.
 
-    Once connected, their node will appear as a bubble on your map.
+3. File Sharing (The Library)
 
-3. Chatting
+   Hosting: Any file placed in your ./data/shared folder is automatically indexed into your local Bloom Filter and made searchable to peers.
 
-    Click any node on the Topology Map or select them from the Comms Sidebar.
+   Searching: Go to the Library tab. Type a keyword (e.g., "blueprints"). Axon queries your neighbors' filters in real-time.
 
-    The connection status (Online/Offline) is handled automatically.
+   Downloading: Click Download. The Swarm Engine will automatically find other peers who possess the file and parallelize the transfer.
 
-    ✓ Green check: Message delivered.
+4. Security & Moderation
 
-    🕒 Grey clock: Message pending (peer is offline; will retry automatically).
+   SSRF Protection: Strict input sanitization prevents malicious peers from probing your local network or localhost ports.
 
-4. Managing Peers
-
-    Delete: In the chat window, click the Trash icon to remove a peer and wipe history.
-
-    Block: Click the Ban icon to ignore all future connection attempts from that address.
+   Block: Click the Ban icon in chat to sever the connection and ignore future handshakes.
 
 📡 Technical Protocol
 
 AXON uses a custom JSON-over-HTTP protocol routed exclusively through Tor SOCKS5 proxies.
 
-    Handshake: Nodes exchange persistent Identity Keys (Ed25519) and ephemeral Encryption Keys (X25519).
+```
+Discovery: Nodes exchange Bloom Filters (64KB bitsets) to advertise content availability without leaking exact file metadata to passive observers.
 
-    Gossip: Every 60 seconds, nodes exchange partial peer lists with random neighbors to maintain the mesh.
+Transport: * Identity: Ed25519 (Signing/Auth)
 
-    Persistence: Identity keys, peer lists, and chat history are saved to the local ./data_[port]/ directory.
+    Encryption: X25519 (Chat E2EE) + Tor Native Encryption
 
-Disclaimer: This is experimental software. While it uses industry-standard crypto primitives, it has not been audited.
+Storage: SQLite in WAL (Write-Ahead Logging) mode ensures high concurrency for chat logs and file indexing.
+
+Persistence: Identity keys, state files, and databases are saved to the local ./data_[port]/ directory.
+```
+
+⚠️ Disclaimer
+
+This is experimental software. While Axon uses industry-standard cryptographic primitives (Ed25519, SHA-256, AES-GCM), it has not been formally audited. Use at your own risk.
