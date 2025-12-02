@@ -1,9 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:sqflite/sqflite.dart'; // Add import for ConflictAlgorithm if needed
+import 'package:sqflite/sqflite.dart';
 import '../logic/database.dart';
-import '../logic/outbox.dart';
-import '../logic/server_node.dart'; // To access client? ideally client passes down
-import '../main.dart'; // To access global state or use GetIt/Provider
+import '../logic/outbox.dart'; // Import Outbox logic
+import '../main.dart'; // Access AxonApp.client
 
 class ChatDetailScreen extends StatefulWidget {
   final String peerId;
@@ -19,11 +18,6 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
   final TextEditingController _controller = TextEditingController();
   List<Map<String, dynamic>> _messages = [];
 
-  // NOTE: In a real app, use Provider/Riverpod to get these services
-  // For now, we assume you can create a temporary instance or pass it
-  // We will just read from DB and 'pretend' to send for UI demo if services aren't passed
-  // To make this work properly, passing the AxonClient via Constructor is best.
-
   @override
   void initState() {
     super.initState();
@@ -38,7 +32,9 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       whereArgs: [widget.peerId],
       orderBy: 'timestamp ASC'
     );
-    setState(() => _messages = res);
+    if (mounted) {
+      setState(() => _messages = res);
+    }
   }
 
   Future<void> _send() async {
@@ -46,22 +42,28 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
     final content = _controller.text;
     _controller.clear();
 
-    // 1. Optimistic UI Update (Save to DB as 'pending' or 'out')
+    // 1. Optimistic UI Update (Save to DB as 'sending')
     final db = await AxonDatabase.db;
     await db.insert('messages', {
       'id': DateTime.now().millisecondsSinceEpoch.toString(),
       'peer_id': widget.peerId,
       'direction': 'out',
       'content': content,
-      'status': 'sending',
+      'status': 'sending', // Temporary status
       'timestamp': DateTime.now().toIso8601String(),
     });
 
     await _loadMessages();
 
-    // 2. Actually Send (Requires access to AxonClient)
-    // For this port, we need to expose AxonClient globally or pass it.
-    // print("TODO: Trigger AxonClient.sendMessage('$content')");
+    // 2. TRIGGER THE NETWORK CALL (This was missing!)
+    print("UI: Triggering sendMessage to ${widget.peerId}");
+
+    // We don't await this so the UI doesn't freeze if Tor is slow
+    AxonApp.client.sendMessage(widget.peerId, content).then((_) {
+      print("UI: Send returned");
+      // Optional: Reload to update status from 'sending' to 'sent'
+      _loadMessages();
+    });
   }
 
   @override
@@ -86,7 +88,17 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                       color: isMe ? const Color(0xFF06b6d4) : const Color(0xFF374151),
                       borderRadius: BorderRadius.circular(8),
                     ),
-                    child: Text(msg['content'] ?? '', style: const TextStyle(color: Colors.white)),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Text(msg['content'] ?? '', style: const TextStyle(color: Colors.white)),
+                        if (isMe)
+                          Text(
+                            msg['status'] ?? '',
+                            style: TextStyle(fontSize: 10, color: Colors.white.withOpacity(0.5))
+                          )
+                      ],
+                    ),
                   ),
                 );
               },
@@ -99,8 +111,10 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
                 Expanded(
                   child: TextField(
                     controller: _controller,
+                    style: const TextStyle(color: Colors.white),
                     decoration: const InputDecoration(
                       hintText: "Type a message...",
+                      hintStyle: TextStyle(color: Colors.grey),
                       border: OutlineInputBorder(),
                       filled: true,
                       fillColor: Color(0xFF1f2937),

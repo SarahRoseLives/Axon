@@ -48,17 +48,24 @@ class AxonAppState extends State<AxonApp> {
       _crypto = CryptoManager();
       await _crypto.init();
 
-      setState(() => _status = "Starting Local Server...");
+      setState(() => _status = "Starting Local Listener...");
+      // Start the server that handles INCOMING requests
       _server = AxonServer(_crypto);
       await _server.start();
 
-      // --- INITIALIZE GLOBAL CLIENT ---
-      AxonApp.client = AxonClient(_tor, _crypto);
+      setState(() => _status = "Bootstrapping Tor...");
 
-      setState(() => _status = "Bootstrapping Tor (Wait 30s)...");
+      // --- START TOR PLUGIN ---
+      // This boots the native service which:
+      // 1. Starts Tor
+      // 2. Maps the Hidden Service (Incoming) -> localhost:8080
+      // 3. Opens an HTTP Proxy (Outgoing) -> localhost:9080
       await _tor.start();
 
       final hostname = await _tor.getOnionHostname();
+
+      // Initialize the Client with the active Tor instance
+      AxonApp.client = AxonClient(_tor, _crypto);
 
       setState(() {
         _status = "Online";
@@ -99,6 +106,8 @@ class AxonAppState extends State<AxonApp> {
   }
 }
 
+// ... HomeScreen class remains unchanged from your previous code ...
+// ... Add HomeScreen and other screens from previous input here ...
 class HomeScreen extends StatefulWidget {
   final String status;
   final String myOnion;
