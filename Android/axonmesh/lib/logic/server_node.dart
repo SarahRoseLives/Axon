@@ -8,7 +8,9 @@ import 'package:sqflite/sqflite.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'database.dart';
 import 'crypto_manager.dart';
-import 'events.dart'; // <--- IMPORT THIS
+import 'events.dart';
+import 'bloom_filter.dart';
+import 'file_manager.dart';
 
 class AxonServer {
   final CryptoManager crypto;
@@ -21,7 +23,9 @@ class AxonServer {
     app.post('/api/peers/announce', _handleAnnounce);
     app.post('/api/chat/recv', _handleChatRecv);
     app.post('/api/file/manifest', _handleManifest);
-    app.get('/api/file/search', _handleSearch);
+
+    // FIX: Match Go naming convention '/query'
+    app.get('/api/file/query', _handleSearch);
     app.get('/api/file/chunk', _handleFileChunk);
 
     final handler = Pipeline()
@@ -29,8 +33,6 @@ class AxonServer {
         .addMiddleware(_corsMiddleware)
         .addHandler(app);
 
-    // ⚠️ TRIPLE CHECK: Must be InternetAddress.anyIPv4
-    // Binding to 'localhost' is the #1 cause of 502 errors on Android Tor apps.
     await shelf_io.serve(
       handler,
       InternetAddress.anyIPv4,
@@ -89,8 +91,6 @@ class AxonServer {
     }
   }
 
-  Future<Response> _handleManifest(Request request) async => Response.ok('OK');
-
   Future<Response> _handleChatRecv(Request request) async {
     try {
       final payload = await request.readAsString();
@@ -122,9 +122,7 @@ class AxonServer {
         'timestamp': DateTime.now().toIso8601String(),
       });
 
-      // --- TRIGGER UI UPDATE ---
       AxonEvents.triggerMessageUpdate();
-      // -------------------------
 
       return Response.ok('OK');
     } catch (e) {
@@ -133,13 +131,72 @@ class AxonServer {
     }
   }
 
+  Future<Response> _handleManifest(Request request) async {
+    try {
+      final payload = await request.readAsString();
+      final data = jsonDecode(payload);
+
+      final owner = data['owner'];
+      final filterData = data['filter'];
+
+      if (filterData != null && filterData['bitset'] != null) {
+        final bytes = base64Decode(filterData['bitset']);
+        final filter = BloomFilter.fromBytes(bytes);
+        FileManager().processRemoteFilter(owner, filter);
+      }
+
+      return Response.ok('OK');
+    } catch(e) {
+      print("Error processing manifest: $e");
+      return Response.internalServerError();
+    }
+  }
+
   Future<Response> _handleSearch(Request request) async {
     final query = request.url.queryParameters['q'];
+    print("🔎 [Server] Incoming search request for: '$query'");
+
     if (query == null || query.isEmpty) return Response.ok('[]');
+
     final db = await AxonDatabase.db;
-    final results = await db.query('my_files', where: 'name LIKE ?', whereArgs: ['%$query%']);
+    final results = await db.rawQuery(
+      "SELECT * FROM my_files WHERE name LIKE ?",
+      ['%$query%']
+    );
+
+    print("📂 [Server] Found ${results.length} local matches for '$query'");
+
     return Response.ok(jsonEncode(results), headers: {'content-type': 'application/json'});
   }
 
-  Future<Response> _handleFileChunk(Request request) async => Response.notFound('Not implemented');
+  Future<Response> _handleFileChunk(Request request) async {
+    final id = request.url.queryParameters['id'];
+    final idxStr = request.url.queryParameters['idx'];
+
+    if (id == null || idxStr == null) return Response.notFound('Missing params');
+
+    final db = await AxonDatabase.db;
+    final results = await db.query('my_files', where: 'id = ?', whereArgs: [id]);
+
+    if (results.isEmpty) return Response.notFound('File not found');
+
+    final filePath = results.first['path'] as String;
+    final file = File(filePath);
+
+    if (!await file.exists()) return Response.notFound('File missing on disk');
+
+    final idx = int.tryParse(idxStr) ?? 0;
+    const chunkSize = 512 * 1024;
+    final start = idx * chunkSize;
+
+    try {
+      final stream = file.openRead(start, start + chunkSize);
+      return Response.ok(stream, headers: {
+        'Content-Type': 'application/octet-stream',
+      });
+    } catch (e) {
+      print("Error reading chunk: $e");
+      return Response.internalServerError();
+    }
+  }
 }
