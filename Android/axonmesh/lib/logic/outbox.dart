@@ -1,3 +1,4 @@
+// ====logic/outbox.dart====
 import 'dart:convert';
 import 'dart:io';
 import 'package:tor_hidden_service/tor_hidden_service.dart';
@@ -7,6 +8,7 @@ import 'package:path/path.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'database.dart';
 import 'crypto_manager.dart';
+import 'events.dart'; // <--- IMPORT THIS
 
 class AxonClient {
   final TorHiddenService tor;
@@ -14,19 +16,14 @@ class AxonClient {
   late final TorOnionClient _onionClient;
 
   AxonClient(this.tor, this.crypto) {
-    // 🌟 Initialize the new client that handles the proxy tunnel automatically
     _onionClient = tor.getUnsecureTorClient();
   }
 
   // --- HELPER: Prepare HTTP URL ---
   String _prepareUrl(String onion, String path) {
     var host = onion.trim();
-    // Remove existing schemes to prevent double protocol
     host = host.replaceFirst('http://', '').replaceFirst('https://', '');
-    // Remove trailing slashes
     if (host.endsWith('/')) host = host.substring(0, host.length - 1);
-
-    // 🌟 Use plain HTTP. The TorOnionClient handles the secure tunnel.
     return 'http://$host$path';
   }
 
@@ -54,7 +51,6 @@ class AxonClient {
     print("🧅 [HANDSHAKE] Sending to $url");
 
     try {
-      // 🌟 USE NEW CLIENT
       final response = await _onionClient.post(
         url,
         body: jsonEncode(payload),
@@ -64,7 +60,6 @@ class AxonClient {
       print("📥 [HANDSHAKE] Status: ${response.statusCode}");
 
       if (response.statusCode == 200) {
-        // Response body is already a String! No transform needed.
         final data = jsonDecode(response.body);
 
         final db = await AxonDatabase.db;
@@ -117,7 +112,6 @@ class AxonClient {
     print("🧅 [CHAT] Sending to $url");
 
     try {
-      // 🌟 USE NEW CLIENT
       final response = await _onionClient.post(
         url,
         body: jsonEncode(payload),
@@ -133,6 +127,11 @@ class AxonClient {
           'status': 'sent',
           'timestamp': DateTime.now().toIso8601String(),
         });
+
+        // --- TRIGGER UI UPDATE ---
+        AxonEvents.triggerMessageUpdate();
+        // -------------------------
+
         print("✅ [CHAT] Delivered.");
       } else {
         print("⚠️ [CHAT] Rejected: ${response.body}");
@@ -153,7 +152,6 @@ class AxonClient {
         final onion = peer['onion_address'];
         final url = _prepareUrl(onion.toString(), '/api/file/search?q=$query');
 
-        // 🌟 USE NEW CLIENT
         final response = await _onionClient.get(url);
 
         if (response.statusCode == 200) {
@@ -175,9 +173,6 @@ class AxonClient {
   }
 
   // 4. Download File
-  // ⚠️ NOTE: We CANNOT use TorOnionClient for binary downloads yet because
-  // it forces UTF-8 decoding on the response.
-  // We must fall back to the "Secure" client (HTTP Client wrapper) which supports byte streams.
   Future<void> downloadFile(String peerOnion, String fileId, String fileName, int size) async {
     final saveDir = await getApplicationDocumentsDirectory();
     final downloadsDir = Directory(join(saveDir.path, 'downloads'));
@@ -192,16 +187,13 @@ class AxonClient {
 
     print("📥 Starting download: $fileName");
 
-    // 🌟 Use Secure Client for Binary Streams (requires https:// hack)
     final client = tor.getSecureTorClient();
 
     try {
       for (int i = 0; i < totalChunks; i++) {
-        // Strip http/https to be safe, then force https://
         var cleanOnion = peerOnion.replaceFirst('http://', '').replaceFirst('https://', '');
         if (cleanOnion.endsWith('/')) cleanOnion = cleanOnion.substring(0, cleanOnion.length - 1);
 
-        // Force HTTPS to trigger CONNECT tunnel for the standard HttpClient
         final targetUrl = 'https://$cleanOnion/api/file/chunk?id=$fileId&idx=$i';
 
         final request = await client.getUrl(Uri.parse(targetUrl));

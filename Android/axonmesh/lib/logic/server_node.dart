@@ -1,3 +1,4 @@
+// ====logic/server_node.dart====
 import 'dart:convert';
 import 'dart:io';
 import 'package:shelf/shelf.dart';
@@ -7,6 +8,7 @@ import 'package:sqflite/sqflite.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'database.dart';
 import 'crypto_manager.dart';
+import 'events.dart'; // <--- IMPORT THIS
 
 class AxonServer {
   final CryptoManager crypto;
@@ -50,7 +52,7 @@ class AxonServer {
     };
   }
 
-  // --- HANDLERS (Unchanged logic) ---
+  // --- HANDLERS ---
 
   Future<Response> _handleAnnounce(Request request) async {
     try {
@@ -119,6 +121,10 @@ class AxonServer {
         'status': 'received',
         'timestamp': DateTime.now().toIso8601String(),
       });
+
+      // --- TRIGGER UI UPDATE ---
+      AxonEvents.triggerMessageUpdate();
+      // -------------------------
 
       return Response.ok('OK');
     } catch (e) {

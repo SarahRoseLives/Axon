@@ -1,8 +1,11 @@
+// ====screens/chat_detail_screen.dart====
+import 'dart:async'; // Import for StreamSubscription
 import 'package:flutter/material.dart';
 import 'package:sqflite/sqflite.dart';
 import '../logic/database.dart';
-import '../logic/outbox.dart'; // Import Outbox logic
-import '../main.dart'; // Access AxonApp.client
+import '../logic/outbox.dart';
+import '../logic/events.dart'; // <--- IMPORT EVENTS
+import '../main.dart';
 
 class ChatDetailScreen extends StatefulWidget {
   final String peerId;
@@ -17,11 +20,25 @@ class ChatDetailScreen extends StatefulWidget {
 class _ChatDetailScreenState extends State<ChatDetailScreen> {
   final TextEditingController _controller = TextEditingController();
   List<Map<String, dynamic>> _messages = [];
+  StreamSubscription? _msgSubscription; // <--- Subscription
 
   @override
   void initState() {
     super.initState();
     _loadMessages();
+
+    // --- LISTEN FOR REAL-TIME UPDATES ---
+    _msgSubscription = AxonEvents.onMessage.listen((_) {
+      print("🔄 UI: Received update event, reloading messages...");
+      _loadMessages();
+    });
+  }
+
+  @override
+  void dispose() {
+    _msgSubscription?.cancel(); // <--- Prevent Memory Leaks
+    _controller.dispose();
+    super.dispose();
   }
 
   Future<void> _loadMessages() async {
@@ -49,20 +66,16 @@ class _ChatDetailScreenState extends State<ChatDetailScreen> {
       'peer_id': widget.peerId,
       'direction': 'out',
       'content': content,
-      'status': 'sending', // Temporary status
+      'status': 'sending',
       'timestamp': DateTime.now().toIso8601String(),
     });
 
-    await _loadMessages();
+    await _loadMessages(); // Refresh local view immediately
 
-    // 2. TRIGGER THE NETWORK CALL (This was missing!)
-    print("UI: Triggering sendMessage to ${widget.peerId}");
-
-    // We don't await this so the UI doesn't freeze if Tor is slow
+    // 2. Trigger Network Call
     AxonApp.client.sendMessage(widget.peerId, content).then((_) {
-      print("UI: Send returned");
-      // Optional: Reload to update status from 'sending' to 'sent'
-      _loadMessages();
+        // The Outbox will trigger AxonEvents.triggerMessageUpdate()
+        // which will be caught by the listener above to update 'sending' -> 'sent'
     });
   }
 

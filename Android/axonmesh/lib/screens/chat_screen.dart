@@ -1,6 +1,9 @@
+// ====screens/chat_screen.dart====
+import 'dart:async'; // Import for StreamSubscription
 import 'package:flutter/material.dart';
 import '../logic/database.dart';
-import 'chat_detail_screen.dart'; // We will create this next
+import '../logic/events.dart'; // <--- IMPORT EVENTS
+import 'chat_detail_screen.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -11,11 +14,23 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   List<Map<String, dynamic>> _threads = [];
+  StreamSubscription? _msgSubscription; // <--- Subscription
 
   @override
   void initState() {
     super.initState();
     _loadThreads();
+
+    // --- LISTEN FOR UPDATES ---
+    _msgSubscription = AxonEvents.onMessage.listen((_) {
+      _loadThreads();
+    });
+  }
+
+  @override
+  void dispose() {
+    _msgSubscription?.cancel();
+    super.dispose();
   }
 
   Future<void> _loadThreads() async {
