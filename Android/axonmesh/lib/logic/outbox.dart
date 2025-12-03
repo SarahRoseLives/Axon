@@ -11,48 +11,27 @@ import 'crypto_manager.dart';
 class AxonClient {
   final TorHiddenService tor;
   final CryptoManager crypto;
+  late final TorOnionClient _onionClient;
 
-  AxonClient(this.tor, this.crypto);
+  AxonClient(this.tor, this.crypto) {
+    // 🌟 Initialize the new client that handles the proxy tunnel automatically
+    _onionClient = tor.getUnsecureTorClient();
+  }
 
-  // --- CORE NETWORK HELPER ---
-  Future<HttpClientResponse> _sendOverTor(String method, String onionUrl, {Object? body}) async {
-    // 1. FORCE HTTPS
-    // This makes Dart HttpClient send a CONNECT command.
-    // The Android Tor Plugin's HTTPTunnelPort (9080) requires CONNECT.
-    // The Go Peer will receive this on port 443 and complete the TLS handshake.
-    if (onionUrl.startsWith('http://')) {
-      onionUrl = onionUrl.replaceFirst('http://', 'https://');
-    } else if (!onionUrl.startsWith('https://')) {
-      onionUrl = 'https://$onionUrl';
-    }
+  // --- HELPER: Prepare HTTP URL ---
+  String _prepareUrl(String onion, String path) {
+    var host = onion.trim();
+    // Remove existing schemes to prevent double protocol
+    host = host.replaceFirst('http://', '').replaceFirst('https://', '');
+    // Remove trailing slashes
+    if (host.endsWith('/')) host = host.substring(0, host.length - 1);
 
-    print("🧅 [CLIENT] Request: $method $onionUrl");
-
-    // 2. Get the proxy-enabled client
-    final client = tor.getTorHttpClient();
-
-    try {
-      final uri = Uri.parse(onionUrl);
-      final request = await client.openUrl(method, uri);
-
-      request.headers.contentType = ContentType.json;
-      // Optional: Set host header for v3 onion validity
-      request.headers.set(HttpHeaders.hostHeader, uri.host);
-
-      if (body != null) {
-        request.write(jsonEncode(body));
-      }
-
-      return await request.close();
-    } catch (e) {
-      print("❌ [CLIENT] Network Error to $onionUrl: $e");
-      throw Exception("Tor Connection Failed");
-    }
+    // 🌟 Use plain HTTP. The TorOnionClient handles the secure tunnel.
+    return 'http://$host$path';
   }
 
   // 1. Handshake
   Future<void> sendHandshake(String targetOnion) async {
-    final cleanTarget = targetOnion.trim();
     final myPub = await crypto.getChatPublicKey();
     final prefs = await SharedPreferences.getInstance();
     final myNick = prefs.getString('nickname') ?? 'Anonymous';
@@ -71,28 +50,36 @@ class AxonClient {
       'signature': ''
     };
 
-    try {
-      final targetUrl = 'http://$cleanTarget/api/peers/announce';
-      final response = await _sendOverTor('POST', targetUrl, body: payload);
+    final url = _prepareUrl(targetOnion, '/api/peers/announce');
+    print("🧅 [HANDSHAKE] Sending to $url");
 
-      print("📥 [CLIENT] Handshake Response: ${response.statusCode}");
+    try {
+      // 🌟 USE NEW CLIENT
+      final response = await _onionClient.post(
+        url,
+        body: jsonEncode(payload),
+        headers: {'Content-Type': 'application/json'}
+      );
+
+      print("📥 [HANDSHAKE] Status: ${response.statusCode}");
 
       if (response.statusCode == 200) {
-        final responseBody = await response.transform(utf8.decoder).join();
-        final data = jsonDecode(responseBody);
+        // Response body is already a String! No transform needed.
+        final data = jsonDecode(response.body);
 
         final db = await AxonDatabase.db;
         await db.insert('peers', {
-          'onion_address': cleanTarget,
+          'onion_address': targetOnion.trim(),
           'nickname': data['nickname'],
           'public_key': data['public_key'],
           'trust_level': 'direct',
           'last_seen': DateTime.now().toIso8601String(),
         }, conflictAlgorithm: ConflictAlgorithm.replace);
-        print("✅ [CLIENT] Handshake successful!");
+
+        print("✅ [HANDSHAKE] Success!");
       }
     } catch (e) {
-      print("❌ [CLIENT] Handshake Exception: $e");
+      print("❌ [HANDSHAKE] Error: $e");
     }
   }
 
@@ -126,11 +113,16 @@ class AxonClient {
       'nonce': encrypted['nonce'],
     };
 
-    try {
-      final targetUrl = 'http://$cleanTarget/api/chat/recv';
-      final response = await _sendOverTor('POST', targetUrl, body: payload);
+    final url = _prepareUrl(cleanTarget, '/api/chat/recv');
+    print("🧅 [CHAT] Sending to $url");
 
-      print("📥 [CLIENT] Send Response: ${response.statusCode}");
+    try {
+      // 🌟 USE NEW CLIENT
+      final response = await _onionClient.post(
+        url,
+        body: jsonEncode(payload),
+        headers: {'Content-Type': 'application/json'}
+      );
 
       if (response.statusCode == 200) {
         await db.insert('messages', {
@@ -141,13 +133,12 @@ class AxonClient {
           'status': 'sent',
           'timestamp': DateTime.now().toIso8601String(),
         });
-        print("✅ [CLIENT] Message Delivered.");
+        print("✅ [CHAT] Delivered.");
       } else {
-        final err = await response.transform(utf8.decoder).join();
-        print("⚠️ [CLIENT] Server Rejected: $err");
+        print("⚠️ [CHAT] Rejected: ${response.body}");
       }
     } catch (e) {
-      print("❌ [CLIENT] Network Exception: $e");
+      print("❌ [CHAT] Network Exception: $e");
     }
   }
 
@@ -160,13 +151,13 @@ class AxonClient {
     await Future.wait(peers.map((peer) async {
       try {
         final onion = peer['onion_address'];
-        final targetUrl = 'http://$onion/api/file/search?q=$query';
+        final url = _prepareUrl(onion.toString(), '/api/file/search?q=$query');
 
-        final response = await _sendOverTor('GET', targetUrl);
+        // 🌟 USE NEW CLIENT
+        final response = await _onionClient.get(url);
 
         if (response.statusCode == 200) {
-          final body = await response.transform(utf8.decoder).join();
-          final List<dynamic> files = jsonDecode(body);
+          final List<dynamic> files = jsonDecode(response.body);
           for (var f in files) {
             results.add({
               'id': f['id'],
@@ -177,13 +168,16 @@ class AxonClient {
           }
         }
       } catch (e) {
-        print("Search failed for ${peer['onion_address']}");
+        print("Search failed for ${peer['onion_address']}: $e");
       }
     }));
     return results;
   }
 
   // 4. Download File
+  // ⚠️ NOTE: We CANNOT use TorOnionClient for binary downloads yet because
+  // it forces UTF-8 decoding on the response.
+  // We must fall back to the "Secure" client (HTTP Client wrapper) which supports byte streams.
   Future<void> downloadFile(String peerOnion, String fileId, String fileName, int size) async {
     final saveDir = await getApplicationDocumentsDirectory();
     final downloadsDir = Directory(join(saveDir.path, 'downloads'));
@@ -198,16 +192,19 @@ class AxonClient {
 
     print("📥 Starting download: $fileName");
 
-    final client = tor.getTorHttpClient();
+    // 🌟 Use Secure Client for Binary Streams (requires https:// hack)
+    final client = tor.getSecureTorClient();
 
     try {
       for (int i = 0; i < totalChunks; i++) {
-        final targetUrl = 'http://$peerOnion/api/file/chunk?id=$fileId&idx=$i';
+        // Strip http/https to be safe, then force https://
+        var cleanOnion = peerOnion.replaceFirst('http://', '').replaceFirst('https://', '');
+        if (cleanOnion.endsWith('/')) cleanOnion = cleanOnion.substring(0, cleanOnion.length - 1);
 
-        // Manual HTTPS enforcement here too
-        final secureUrl = targetUrl.replaceFirst('http://', 'https://');
+        // Force HTTPS to trigger CONNECT tunnel for the standard HttpClient
+        final targetUrl = 'https://$cleanOnion/api/file/chunk?id=$fileId&idx=$i';
 
-        final request = await client.getUrl(Uri.parse(secureUrl));
+        final request = await client.getUrl(Uri.parse(targetUrl));
         final response = await request.close();
 
         if (response.statusCode == 200) {

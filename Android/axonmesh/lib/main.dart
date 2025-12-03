@@ -56,12 +56,7 @@ class AxonAppState extends State<AxonApp> {
       setState(() => _status = "Bootstrapping Tor...");
 
       // --- START TOR PLUGIN ---
-      // This boots the native service which:
-      // 1. Starts Tor
-      // 2. Maps the Hidden Service (Incoming) -> localhost:8080
-      // 3. Opens an HTTP Proxy (Outgoing) -> localhost:9080
       await _tor.start();
-
       final hostname = await _tor.getOnionHostname();
 
       // Initialize the Client with the active Tor instance
@@ -82,6 +77,7 @@ class AxonAppState extends State<AxonApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Axon Mesh',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF0b1120),
         primaryColor: const Color(0xFF06b6d4),
@@ -106,8 +102,6 @@ class AxonAppState extends State<AxonApp> {
   }
 }
 
-// ... HomeScreen class remains unchanged from your previous code ...
-// ... Add HomeScreen and other screens from previous input here ...
 class HomeScreen extends StatefulWidget {
   final String status;
   final String myOnion;

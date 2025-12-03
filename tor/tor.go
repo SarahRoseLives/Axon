@@ -1,119 +1,113 @@
 package tor
 
 import (
-	"context"
-	"crypto/ed25519"
-	"crypto/tls" // <--- Added for TLS Config
-	"fmt"
-	"net/http"
-	"os"
-	"path/filepath"
-	"sync"
-	"time"
+    "context"
+    "crypto/ed25519"
+    "fmt"
+    "net/http"
+    "os"
+    "path/filepath"
+    "runtime"
+    "sync"
+    "time"
 
-	"github.com/cretz/bine/tor"
+    "github.com/cretz/bine/tor"
 )
 
 type Controller struct {
-	Instance   *tor.Tor
-	Onion      *tor.OnionService
-	Ready      bool
-	httpClient *http.Client
-	clientMu   sync.Mutex
+    Instance   *tor.Tor
+    Onion      *tor.OnionService
+    Ready      bool
+    httpClient *http.Client // CACHED CLIENT
+    clientMu   sync.Mutex
 }
 
 func NewController() *Controller {
-	return &Controller{Ready: false}
+    return &Controller{Ready: false}
 }
 
-// Start initializes Tor and returns the OnionService listener directly.
-// We listen on Port 443 so incoming traffic from Flutter (which forces HTTPS) works correctly.
-func (c *Controller) Start(baseDir string, privKey ed25519.PrivateKey) (*tor.OnionService, error) {
-	fmt.Println("🧅 Initializing Tor Background Service...")
+func (c *Controller) Start(baseDir string, privKey ed25519.PrivateKey, handler http.Handler) (string, error) {
+    fmt.Println("🧅 Initializing Tor Background Service...")
 
-	torDataDir := filepath.Join(baseDir, "tor_sys")
-	if err := os.MkdirAll(torDataDir, 0700); err != nil {
-		return nil, fmt.Errorf("could not create data dir: %w", err)
-	}
+    torDataDir := filepath.Join(baseDir, "tor_sys")
+    if err := os.MkdirAll(torDataDir, 0700); err != nil {
+        return "", fmt.Errorf("could not create data dir: %w", err)
+    }
 
-	conf := &tor.StartConf{DataDir: torDataDir}
+    conf := &tor.StartConf{DataDir: torDataDir}
 
-	// Start Tor process
-	t, err := tor.Start(nil, conf)
-	if err != nil {
-		return nil, fmt.Errorf("tor start failed: %w", err)
-	}
-	c.Instance = t
+    if runtime.GOOS == "windows" {
+        if _, err := os.Stat("tor.exe"); err == nil {
+            absPath, _ := filepath.Abs("tor.exe")
+            conf.ExePath = absPath
+        }
+    }
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
+    t, err := tor.Start(nil, conf)
+    if err != nil {
+        return "", fmt.Errorf("tor start failed: %w", err)
+    }
+    c.Instance = t
 
-	fmt.Println("⏳ Establishing Circuit (this may take 30s)...")
+    ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+    defer cancel()
 
-	// LISTEN ON PORT 443 (HTTPS)
-	// Flutter's HttpClient will send 'CONNECT <onion>:443' when we use https:// links.
-	// Tor will route that to this listener.
-	onion, err := t.Listen(ctx, &tor.ListenConf{
-		Version3:    true,
-		RemotePorts: []int{443},
-		Key:         privKey,
-	})
-	if err != nil {
-		t.Close()
-		return nil, fmt.Errorf("onion service creation failed: %w", err)
-	}
+    fmt.Println("⏳ Establishing Circuit (this may take 30s)...")
+    onion, err := t.Listen(ctx, &tor.ListenConf{
+        Version3:    true,
+        RemotePorts: []int{80},
+        Key:         privKey,
+    })
+    if err != nil {
+        t.Close()
+        return "", fmt.Errorf("onion service creation failed: %w", err)
+    }
 
-	c.Onion = onion
-	c.Ready = true
+    c.Onion = onion
+    c.Ready = true
 
-	// Return the listener so server.go can wrap it in TLS
-	return onion, nil
+    go http.Serve(onion, handler)
+
+    return onion.ID, nil
 }
 
-// GetHttpClient returns a client capable of routing through Tor.
-// CRITICAL FIX: It ignores self-signed certificate errors.
+// OPTIMIZED: Reuses the same client (and underlying TCP connections)
 func (c *Controller) GetHttpClient() (*http.Client, error) {
-	c.clientMu.Lock()
-	defer c.clientMu.Unlock()
+    c.clientMu.Lock()
+    defer c.clientMu.Unlock()
 
-	if !c.Ready || c.Instance == nil {
-		return nil, fmt.Errorf("tor not ready")
-	}
+    if !c.Ready || c.Instance == nil {
+        return nil, fmt.Errorf("tor not ready")
+    }
 
-	// Return cached client if it exists
-	if c.httpClient != nil {
-		return c.httpClient, nil
-	}
+    // Return existing client if available
+    if c.httpClient != nil {
+        return c.httpClient, nil
+    }
 
-	// Create the Tor Dialer
-	dialer, err := c.Instance.Dialer(context.Background(), nil)
-	if err != nil {
-		return nil, err
-	}
+    dialer, err := c.Instance.Dialer(context.Background(), nil)
+    if err != nil {
+        return nil, err
+    }
 
-	// Configure Transport
-	transport := &http.Transport{
-		DialContext:         dialer.DialContext,
-		MaxIdleConns:        10,
-		MaxIdleConnsPerHost: 5,
-		IdleConnTimeout:     90 * time.Second,
+    // Create a Transport that supports Keep-Alives
+    transport := &http.Transport{
+        DialContext:         dialer.DialContext,
+        MaxIdleConns:        10,
+        MaxIdleConnsPerHost: 5,
+        IdleConnTimeout:     90 * time.Second,
+    }
 
-		// --- CRITICAL FIX FOR HANDSHAKE ERRORS ---
-		// We use self-signed certs for all nodes.
-		// This tells Go to accept the connection anyway.
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
+    c.httpClient = &http.Client{
+        Transport: transport,
+        Timeout:   180 * time.Second,
+    }
 
-	c.httpClient = &http.Client{
-		Transport: transport,
-		Timeout:   180 * time.Second,
-	}
-
-	return c.httpClient, nil
+    return c.httpClient, nil
 }
 
 func (c *Controller) Stop() {
-	if c.Instance != nil {
-		c.Instance.Close()
-	}
+    if c.Instance != nil {
+        c.Instance.Close()
+    }
 }
