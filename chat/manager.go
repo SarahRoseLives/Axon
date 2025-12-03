@@ -107,36 +107,41 @@ func (m *Manager) GetPendingMessages() map[string][]Message {
 }
 
 func (m *Manager) GetHistory(peerID string) []Message {
-	database.DB.Exec("UPDATE messages SET status = 'read' WHERE peer_id = ? AND direction = 'in' AND status = 'received'", peerID)
+    database.DB.Exec("UPDATE messages SET status = 'read' WHERE peer_id = ? AND direction = 'in' AND status = 'received'", peerID)
 
-	rows, err := database.DB.Query(`
-		SELECT id, direction, content, status, timestamp
-		FROM messages
-		WHERE peer_id = ?
-		ORDER BY timestamp ASC LIMIT 50
-	`, peerID)
+    rows, err := database.DB.Query(`
+        SELECT id, direction, content, status, timestamp
+        FROM messages
+        WHERE peer_id = ?
+        ORDER BY timestamp ASC LIMIT 50
+    `, peerID)
 
-	if err != nil { return []Message{} }
-	defer rows.Close()
+    if err != nil { return []Message{} }
+    defer rows.Close()
 
-	var history []Message
-	for rows.Next() {
-		var m Message
-		var dir string
-		rows.Scan(&m.ID, &m.From, &m.Content, &m.Status, &m.Timestamp)
+    var history []Message
+    for rows.Next() {
+        var m Message
+        var dir string
 
-		if dir == "in" {
-			m.Incoming = true
-			m.From = peerID
-			m.To = "me"
-		} else {
-			m.Incoming = false
-			m.From = "me"
-			m.To = peerID
-		}
-		history = append(history, m)
-	}
-	return history
+        // --- FIX BELOW ---
+        // Was: rows.Scan(&m.ID, &m.From, &m.Content, &m.Status, &m.Timestamp)
+        // Now: Scan into '&dir' so the logic below works
+        rows.Scan(&m.ID, &dir, &m.Content, &m.Status, &m.Timestamp)
+        // -----------------
+
+        if dir == "in" {
+            m.Incoming = true
+            m.From = peerID
+            m.To = "me"
+        } else {
+            m.Incoming = false
+            m.From = "me"
+            m.To = peerID
+        }
+        history = append(history, m)
+    }
+    return history
 }
 
 func (m *Manager) GetFeedHistory() []Message {
